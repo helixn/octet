@@ -1,0 +1,172 @@
+# OctetHash — specification v0.1 (DRAFT)
+
+**Status:** draft, open for adversarial review. Parameters marked `T` are
+tunables and will change before any testnet. Nothing in this document is a
+promise; this is a design document, not a launch.
+
+## 1. Goals
+
+OctetHash is a proof-of-work algorithm whose efficient evaluation requires a
+memory subsystem with the profile of **HBM2/HBM2e stacks**:
+
+1. **Capacity** — the working set is 8 GiB; SRAM-based ASICs are excluded
+   because 8 GiB of on-die SRAM does not exist at any economic price.
+2. **Deep random-access parallelism** — each proof attempt issues thousands
+   of independent, uniformly random 256-byte reads. Stacks with many
+   independent channels (HBM2: 32 × 128-bit) sustain this pattern better
+   than few-channel burst-oriented buses (GDDR6X: 16 narrow channels).
+3. **Symmetric read/write + re-keying** — the dataset is XOR-re-keyed from
+   the chain every block; every miner rewrites the full dataset each block.
+   A precomputed ASIC dataset is worthless; a DRAM-stacked ASIC inherits the
+   same write burden as honest miners, so the surviving moat is *power
+   efficiency per GB/s*, where HBM2 leads.
+
+Honesty: no PoW makes hardware *impossible*, only *uneconomical*. OctetHash
+aims at an economic moat, not a physical one.
+
+## 2. Notation
+
+- `H(x)` — BLAKE2b, 64-byte digest unless stated.
+- `H_k(x)` — BLAKE2b with k-byte digest.
+- `le64(n)` — little-endian 64-bit encoding of n.
+- `⊕` — bytewise XOR.
+- Hash inputs are concatenated without separators; all inputs are length-
+  prefixed by construction (fixed fields), see §5 for domain separation.
+
+## 3. Full-scale parameters (T)
+
+| Parameter | Value | Note |
+|---|---|---|
+| `CACHE_BYTES` | 256 MiB | light-verification working set |
+| `CACHE_WORDS` | 2²² × 64 B | sequential-fill chain |
+| `DATASET_ITEMS` | 2²⁵ | dataset elements |
+| `ITEM_BYTES` | 256 B | one dataset element |
+| `ITEM_PARENTS` | 32 | cache elements mixed per dataset item |
+| `LANES` | 4096 | parallel search lanes per attempt |
+| `LANES_PER_BLOCK` | 1024 | CUDA block = 1024 threads |
+| `ROUNDS` | 16 | dataset-read rounds per attempt |
+| `BLOCK_TIME` | 120 s | per-block dataset re-key budget ≈ 10–20 s |
+
+The reference implementation (`reference/octet_ref.py`) runs on reduced
+profiles; all functions are parameterized.
+
+## 4. Cache and dataset
+
+### 4.1 Cache (per epoch)
+
+`epoch = height // EPOCH_BLOCKS`. Seed: `seed_epoch = H(b"octet-epoch" ‖ epoch ‖ epoch_seed_hash)`,
+where `epoch_seed_hash` is recorded in the chain at epoch start (no
+precomputation beyond one epoch).
+
+```
+cache[0] = H(b"octet-cache" ‖ seed_epoch)
+cache[i] = H(cache[i-1] ‖ seed_epoch ‖ le64(i))
+```
+
+Sequentially dependent: parallel generation requires ~`log(CACHE_WORDS)`
+rounds of pairwise mixing; the reference does it sequentially.
+
+### 4.2 Dataset items (base form)
+
+Dataset item `j` (256 B) mixes `ITEM_PARENTS` cache words selected by an
+index stream keyed to `j`:
+
+```
+acc = H(seed_epoch ‖ le64(j))
+for k in 0..ITEM_PARENTS-1:
+    p_k = int(H_8(seed_epoch ‖ le64(j) ‖ le64(k)))  mod CACHE_WORDS
+    acc = H(acc ‖ cache[p_k])
+item_base(j) = H_64(acc ‖ le64(0)) ‖ H_64(acc ‖ le64(1)) ‖ H_64(acc ‖ le64(2)) ‖ H_64(acc ‖ le64(3))
+```
+
+Deriving one item costs ~`(ITEM_PARENTS + 5)` BLAKE2b calls: ~50× cheaper to
+*store and read* than to *derive per access* at full scale — this is what
+makes the 8 GiB dataset pay for itself. Light verification (§6) derives only
+the few items it needs.
+
+### 4.3 Per-block re-keying
+
+`seed_block = H(b"octet-block" ‖ prev_solution_hash ‖ height)`.
+
+```
+keystream(j)   = H_64(seed_block ‖ le64(j) ‖ le64(0)) ‖ … ‖ H_64(seed_block ‖ le64(j) ‖ le64(3))
+item_eff(j)    = item_base(j) ⊕ keystream(j)
+```
+
+Consequence: between blocks the entire dataset changes. A miner rewrites
+8 GiB per block (~10–20 s at HBM2 bandwidth); datasets from previous blocks
+are worthless. An ASIC cannot bake in data; it must buy the same capacity and
+write bandwidth as an honest HBM2 stack.
+
+## 5. Proof of work (search)
+
+Per attempt (nonce):
+
+```
+seed        = H_32(b"octet-pow" ‖ header ‖ le64(nonce))
+states[i]   = H_32(b"lane" ‖ seed ‖ le64(i))            for i in 0..LANES-1
+for r in 0..ROUNDS-1:
+    for i in 0..LANES-1:
+        addr_i  = int(states[i][0:4])  mod DATASET_ITEMS
+        item_i  = item_eff(addr_i)                        # 256 B random read
+        states[i] = H_32(states[i] ‖ item_i)
+    b = r mod (LANES_PER_BLOCK in bits)                   # butterfly exchange
+    for i in 0..LANES-1 (simultaneously):
+        states[i] ⊕= states[(i ⊕ (1 << b))]
+result = H_32(concat(states[0..LANES-1]))
+```
+
+Traffic per attempt at full scale: `LANES × ROUNDS × 256 B = 16 MiB` of
+uniformly random reads, `4096` requests concurrently in flight. This access
+pattern is the HBM2 discriminator: 32 independent channels absorb it with
+near-linear bandwidth scaling; narrow-channel buses pay bank-group conflicts.
+
+`partner = i ⊕ (1 << b)` always stays inside a `LANES_PER_BLOCK` lane group,
+so a CUDA block (1024 threads, shared-memory states, `__syncthreads`) can
+implement the round without global synchronization.
+
+The proof is `(nonce)`; everything else is replayed from the header.
+
+## 6. Verification (light path)
+
+A node holds only the 256 MiB cache. To verify a claimed solution:
+
+1. Derive `item_eff(addr)` for every access the search made
+   (`LANES × ROUNDS` items: 65 536 × ~37 BLAKE2b calls at full scale ≈
+   single-digit seconds in C/Rust), including the keystream — both are cheap
+   because only a few thousand items are needed.
+2. Replay the rounds and butterfly exactly as §5.
+3. Check `result ≤ target`.
+
+Verification needs no dataset, no 12/8 GiB RAM, no GPU.
+
+## 7. Difficulty and economics
+
+`target` adjusts each block (standard retarget). Because the per-attempt
+traffic is large (16 MiB), the attempt rate per card is in the tens of
+kH/s at HBM2 bandwidth — difficulty granularity is fine-grained enough for
+solo-style reward variance control.
+
+## 8. Attack analysis (honest)
+
+| Adversary | Outcome |
+|---|---|
+| SRAM ASIC | excluded by capacity: 8 GiB on-die SRAM per solver is not a product |
+| DRAM-stacked ASIC (Linzhi-style) | possible; forced to re-key 8 GiB per block like everyone; competing on J/GB/s where HBM2 stacks lead by ~2–3× |
+| Botnet / home PCs | excluded by capacity + bandwidth per thread |
+| Rentable cloud HBM2 (V100/A100 fleet) | **the real threat** for a small network; requires strong finality/checkpointing at launch and a conservative emission ramp |
+| Precomputation | bounded by per-block re-keying: work past one block is worthless |
+| Light-miner abuse | dataset item derivation is ~50× the cost of a read at full scale; deriving everything per access is strictly worse |
+| Unreviewed-design bugs | the primary risk; hence draft status and mandatory public review before any testnet |
+
+## 9. Open questions (T, for review)
+
+1. `EPOCH_BLOCKS` and whether epoch seeds should commit to the full prior
+   epoch's solution hashes (slower re-key, stronger precomputation defense).
+2. Keystream cost: per-block rewrite is 8 GiB of writes — acceptable at
+   HBM2 bandwidth, hostile to 8 GB consumer cards (by design, revisit).
+3. Butterfly stride schedule (XOR-stride vs rotation) — candidate for
+   custom-silicon cache-latency attacks; needs simulation.
+4. `ROUNDS`×`LANES` trade-off: attempt size vs verification cost.
+5. GRINDO: whether to add a second, latency-bound stage (pointer chasing in
+   dataset) to further punish non-HBM2 buses — costs verification time.

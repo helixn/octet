@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  reference-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps
+        run: pip install pytest
+      - name: Run reference implementation tests
+        run: pytest tests/ -v
+      - name: CLI selftest
+        run: python -m reference.octet_ref
+
+  cuda-compile:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CUDA toolkit (compile check, no GPU needed)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit
+      - name: Compile CUDA skeleton
+        run: make -C cuda compile-only
