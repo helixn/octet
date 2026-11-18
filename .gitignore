@@ -9,3 +9,8 @@ dist/
 venv/
 .idea/
 .vscode/
+.bak/
+dev/
+logs/
+bench-native/
+*.o
