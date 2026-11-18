@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OctetHash reference implementation (v0.1 draft) — pure Python, stdlib only.
+OctetHash reference implementation (spec v0.2 draft; math identical to v0.1) — pure Python, stdlib only.
 
 This is the SPECIFICATION IN CODE: correctness and clarity first, speed last.
 It runs on reduced profiles (see PROFILES) so tests stay fast; the full-scale

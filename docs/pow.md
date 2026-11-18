@@ -1,4 +1,14 @@
-# OctetHash — specification v0.1 (DRAFT)
+# OctetHash — specification v0.2 (DRAFT)
+
+> **v0.2 delta (2026-11-18):** added §10 — hardware tiers and the dataset
+> growth schedule (8 GiB at genesis, +2 GiB/year on a public schedule).
+> Math and parameters for the current epoch are unchanged — the committed
+> test-vector snapshot stays identical to v0.1.
+> **Contract change declared:** the §8 botnet outcome changes from
+> «excluded» to «permitted but priced» — see §10.2 for the honest
+> arithmetic (the gate is economics, not a protocol ban) and §9.6 for the
+> residual threat. Motivation: keep the launch fleet broad (10–24 GB
+> GPUs) while making the HBM2 tilt explicit, time-based and surprise-free.
 
 **Status:** draft, open for adversarial review. Parameters marked `T` are
 tunables and will change before any testnet. Nothing in this document is a
@@ -37,9 +47,9 @@ aims at an economic moat, not a physical one.
 
 | Parameter | Value | Note |
 |---|---|---|
-| `CACHE_BYTES` | 256 MiB | light-verification working set |
+| `CACHE_BYTES` | 256 MiB at genesis (grows with the dataset: §10.1) | light-verification working set |
 | `CACHE_WORDS` | 2²² × 64 B | sequential-fill chain |
-| `DATASET_ITEMS` | 2²⁵ | dataset elements |
+| `DATASET_ITEMS` | 2²⁵ at genesis (growth schedule: §10.1) | dataset elements |
 | `ITEM_BYTES` | 256 B | one dataset element |
 | `ITEM_PARENTS` | 32 | cache elements mixed per dataset item |
 | `LANES` | 4096 | parallel search lanes per attempt |
@@ -153,7 +163,15 @@ solo-style reward variance control.
 |---|---|
 | SRAM ASIC | excluded by capacity: 8 GiB on-die SRAM per solver is not a product |
 | DRAM-stacked ASIC (Linzhi-style) | possible; forced to re-key 8 GiB per block like everyone; competing on J/GB/s where HBM2 stacks lead by ~2–3× |
-| Botnet / home PCs | excluded by capacity + bandwidth per thread |
+| Botnet / home PCs | RAM mining permitted. Honest CPU mining is ~3–4×
+  worse energy-per-attempt than a mid-range GPU (random-read throughput,
+  §10.2), but free-electricity botnets remain a real residual threat for
+  a small network — mitigated by launch finality/checkpointing (§9.6),
+  same as the rented-HBM2 threat |
+| Dataset growth as an ASIC bet | the +2 GiB/year public schedule raises
+  the capacity floor over time — but note the Ethash/Linzhi precedent
+  (§9.6): a known schedule does not stop ASIC vendors, the real cost
+  driver is the growing re-key and capacity floor |
 | Rentable cloud HBM2 (V100/A100 fleet) | **the real threat** for a small network; requires strong finality/checkpointing at launch and a conservative emission ramp |
 | Precomputation | bounded by per-block re-keying: work past one block is worthless |
 | Light-miner abuse | dataset item derivation is ~50× the cost of a read at full scale; deriving everything per access is strictly worse |
@@ -170,3 +188,48 @@ solo-style reward variance control.
 4. `ROUNDS`×`LANES` trade-off: attempt size vs verification cost.
 5. GRINDO: whether to add a second, latency-bound stage (pointer chasing in
    dataset) to further punish non-HBM2 buses — costs verification time.
+6. RAM-mining and botnets (v0.2 review finding): the algorithm prices CPU
+   mining ~3–4× worse per attempt than a GPU, but a free-electricity
+   botnet remains viable against a small network. Candidate mitigations:
+   launch-time finality/checkpointing, emission ramp, or a future
+   latency-bound stage (see 5). Also note the Ethash/Linzhi precedent:
+   a public growth schedule alone does not deter ASIC vendors.
+
+## 10. Hardware tiers and the dataset growth schedule (v0.2)
+
+### 10.1 Growth schedule (public from genesis)
+
+```
+DATASET_ITEMS(height) = 2^25 + 2^23 * floor(height / GROWTH_PERIOD_BLOCKS)
+CACHE_BYTES(height)   = DATASET_ITEMS(height) * 256 B / 32   # keeps the ratio
+GROWTH_PERIOD_BLOCKS  = 262_800        # ≈ 1 year at BLOCK_TIME = 120 s
+```
+
+Genesis dataset: 8 GiB (2^25 items × 256 B), cache 256 MiB. Every
+GROWTH_PERIOD_BLOCKS the dataset grows by 2 GiB (+2^23 items) and the cache
+by 64 MiB, preserving the store-vs-derive ratio. Non-power-of-two item
+counts are legal — addressing is modulo (`%`), exactly as the reference and
+CUDA implementations already do. The schedule is fixed at genesis: no
+surprise forks, old cards phase out gradually, HBM2 economics strengthen
+over time.
+
+### 10.2 Hardware tiers (who may mine, what it costs)
+
+Mining is permissionless: any hardware that can compute the hashes may
+mine. The algorithm prices memory bandwidth and capacity:
+
+| Hardware | At genesis (8 GiB) | Verdict |
+|---|---|---|
+| HBM2/HBM2e stacks (V100/A100-class, 16 GB+) | 900 GB/s at ~250 W | the efficiency ceiling (best J/GB) |
+| GDDR6X 12–24 GB | 760 GB/s at ~350 W | full participant, ~70–85% of HBM2 efficiency |
+| GDDR6/6X 10–12 GB | tight fit (dataset + cache + runtime) | full participant within budget |
+| Cards ≤ 8 GB | dataset does not fit | excluded until they phase out by schedule |
+| Server/desktop CPU + DDR5 | ~80 GB/s | permitted: re-key sweep costs seconds, the real price is search throughput ≈ 4.8k attempts/s per machine (80 GB/s) vs ≈ 45.3k for a mid-range GPU (760 GB/s) — ≈ 9.4× slower, ≈ 3–4× worse J/attempt at a typical desktop/server TDP of 110–150 W vs 350 W |
+| SRAM ASIC | 8+ GiB on-die SRAM | not a product |
+| DRAM-stacked ASIC | possible | must re-key 8+ GiB per block like everyone; competes on J/GB where HBM2 leads |
+
+### 10.3 Verification is not affected by tiers
+
+Nodes verify from the 256 MiB cache (light path, pow.md §6) — no dataset,
+no GPU, no tier requirement. Holding, sending and validating OCT requires
+only ordinary RAM. The tier system prices *mining*, not participation.
