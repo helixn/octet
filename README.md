@@ -43,7 +43,7 @@ make -C cuda                     # needs nvcc (compile-only, no GPU required)
 | Sweet-spot hardware | HBM2/HBM2e stacks (V100, A100-class), 16 GB+ |
 | Excluded | home PCs/botnets (capacity+bandwidth), SRAM ASICs (capacity) |
 
-See [docs/pow.md](docs/pow.md) for the full specification, rationale and the
+See [docs/pow.md](docs/pow.md) for the full OctetHash specification and [docs/crypto.md](docs/crypto.md) for the post-quantum signature and privacy design, rationale and the
 honest attack analysis.
 
 ## License
