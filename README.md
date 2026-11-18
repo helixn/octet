@@ -36,8 +36,8 @@ make -C cuda                     # needs nvcc (compile-only, no GPU required)
 
 | Property | Value |
 |---|---|
-| Dataset | 8 GiB at genesis, +2 GiB/year on a public schedule, re-keyed every block |
-| Cache (light verification) | 256 MiB |
+| Dataset | 4 GiB at genesis, +2 GiB/year on a public schedule, re-keyed every block |
+| Cache (light verification) | 128 MiB |
 | Search | 4096 lanes × 16 rounds × 256 B random reads |
 | Verification | replay from cache, no dataset needed |
 | Sweet-spot hardware | HBM2/HBM2e stacks (V100, A100-class), 16 GB+ |

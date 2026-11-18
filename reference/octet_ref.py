@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-OctetHash reference implementation (spec v0.2 draft; math identical to v0.1) — pure Python, stdlib only.
+OctetHash reference implementation (spec v0.3 draft; math identical to v0.1) — pure Python, stdlib only.
 
 This is the SPECIFICATION IN CODE: correctness and clarity first, speed last.
 It runs on reduced profiles (see PROFILES) so tests stay fast; the full-scale
 parameters live in docs/pow.md and are meant for the CUDA solver.
 
 Two evaluation paths exist and MUST agree:
-  * light path  — dataset items derived from the 256 MiB cache + keystream
+  * light path  — dataset items derived from the 128 MiB cache + keystream
                   (used by nodes to verify, and by this reference everywhere)
   * miner path  — a precomputed effective dataset (cache-derived items XORed
                   with the block keystream, stored in RAM/VRAM)
@@ -28,8 +28,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 FULL_SCALE = {
-    "cache_words": 1 << 22,      # 256 MiB / 64 B
-    "dataset_items": 1 << 25,    # 8 GiB / 256 B
+    "cache_words": 1 << 21,      # 128 MiB / 64 B (genesis, v0.3)
+    "dataset_items": 1 << 24,    # 4 GiB / 256 B (genesis, v0.3; +2 GiB/year)
     "item_parents": 32,
     "lanes": 4096,
     "lanes_per_block": 1024,
