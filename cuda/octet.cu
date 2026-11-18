@@ -30,6 +30,7 @@
 // device BLAKE2b (RFC 7693), streaming, no key. Little-endian digests —
 // identical semantics to Python hashlib.blake2b(digest_size=N).
 // ---------------------------------------------------------------------------
+#ifdef __CUDA_ARCH__
 __device__ __constant__ uint64_t B2B_IV[8] = {
     0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull,
     0xa54ff53a5f1d36f1ull, 0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
@@ -50,12 +51,33 @@ __device__ __constant__ uint8_t B2B_SIGMA[12][16] = {
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
     {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3}
 };
+#else
+static const uint64_t B2B_IV[8] = {
+    0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull,
+    0xa54ff53a5f1d36f1ull, 0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+    0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+};
+static const uint8_t B2B_SIGMA[12][16] = {
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+    {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
+    {11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4},
+    {7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8},
+    {9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13},
+    {2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9},
+    {12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11},
+    {13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10},
+    {6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5},
+    {10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0},
+    {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+    {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3}
+};
+#endif
 
-__device__ __forceinline__ uint64_t rotr64(uint64_t x, int n) {
+__host__ __device__ __forceinline__ uint64_t rotr64(uint64_t x, int n) {
     return (x >> n) | (x << (64 - n));
 }
 
-__device__ void b2b_compress(uint64_t h[8], const uint8_t* block, uint64_t t,
+__host__ __device__ __noinline__ void b2b_compress(uint64_t h[8], const uint8_t* block, uint64_t t,
                              int last) {
     uint64_t m[16], v[16];
 #pragma unroll
@@ -101,7 +123,7 @@ typedef struct {
     uint32_t outlen;
 } oct_blake2b;
 
-__device__ void ob_init(oct_blake2b* s, uint32_t outlen) {
+__host__ __device__ __noinline__ void ob_init(oct_blake2b* s, uint32_t outlen) {
 #pragma unroll
     for (int i = 0; i < 8; i++) s->h[i] = B2B_IV[i];
     s->h[0] ^= 0x01010000u ^ outlen;   // no key, no salt
@@ -110,7 +132,7 @@ __device__ void ob_init(oct_blake2b* s, uint32_t outlen) {
     s->outlen = outlen;
 }
 
-__device__ void ob_update(oct_blake2b* s, const uint8_t* in, uint32_t len) {
+__host__ __device__ __noinline__ void ob_update(oct_blake2b* s, const uint8_t* in, uint32_t len) {
     if (len == 0) return;
     uint32_t fill = 128 - s->buflen;
     if (len > fill) {
@@ -129,7 +151,7 @@ __device__ void ob_update(oct_blake2b* s, const uint8_t* in, uint32_t len) {
     s->buflen += len;
 }
 
-__device__ void ob_final(oct_blake2b* s, uint8_t* out) {
+__host__ __device__ __noinline__ void ob_final(oct_blake2b* s, uint8_t* out) {
     if (s->buflen > 0 || s->t > 0) {
         for (uint32_t i = s->buflen; i < 128; i++) s->buf[i] = 0;
         s->t += s->buflen;
@@ -141,11 +163,11 @@ __device__ void ob_final(oct_blake2b* s, uint8_t* out) {
         out[i] = (uint8_t)(s->h[i >> 3] >> (8 * (i & 7)));
 }
 
-__device__ __forceinline__ void put_le64(uint8_t* out, uint64_t v) {
+__host__ __device__ __forceinline__ void put_le64(uint8_t* out, uint64_t v) {
     for (int i = 0; i < 8; i++) out[i] = (uint8_t)(v >> (8 * i));
 }
 
-__device__ __forceinline__ uint64_t get_be64(const uint8_t* in) {
+__host__ __device__ __forceinline__ uint64_t get_be64(const uint8_t* in) {
     uint64_t v = 0;
     for (int i = 0; i < 8; i++) v = (v << 8) | in[i];
     return v;
@@ -155,14 +177,15 @@ __device__ __forceinline__ uint64_t get_be64(const uint8_t* in) {
 // kernels — stage A: cache fill (sequential chain; single thread suffices
 // for the test profile; full-scale parallel schedule lands with the node)
 // ---------------------------------------------------------------------------
-__global__ void k_cache_fill(uint8_t* cache, const uint8_t* seed_epoch) {
+__global__ void k_cache_fill(uint8_t* cache, const uint8_t* seed_epoch,
+                             uint32_t words) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     oct_blake2b s;
     ob_init(&s, 64);
     ob_update(&s, (const uint8_t*)"octet-cache", 11);
     ob_update(&s, seed_epoch, 64);
     ob_final(&s, cache);
-    for (uint32_t i = 1; i < CACHE_WORDS; i++) {
+    for (uint32_t i = 1; i < words; i++) {
         uint8_t idx[8];
         put_le64(idx, i);
         ob_init(&s, 64);
@@ -180,9 +203,10 @@ __global__ void k_cache_fill(uint8_t* cache, const uint8_t* seed_epoch) {
 // ---------------------------------------------------------------------------
 __global__ void k_dataset_expand(uint8_t* dataset, const uint8_t* cache,
                                  const uint8_t* seed_epoch,
-                                 const uint8_t* seed_block) {
+                                 const uint8_t* seed_block,
+                                 uint32_t items, uint32_t parents) {
     uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= DATASET_ITEMS) return;
+    if (j >= items) return;
     oct_blake2b s;
     uint8_t acc[64], tmp[8];
 
@@ -192,7 +216,7 @@ __global__ void k_dataset_expand(uint8_t* dataset, const uint8_t* cache,
     ob_update(&s, tmp, 8);
     ob_final(&s, acc);
 
-    for (uint32_t k = 0; k < ITEM_PARENTS; k++) {
+    for (uint32_t k = 0; k < parents; k++) {
         uint8_t pd[8];
         ob_init(&s, 8);
         ob_update(&s, seed_epoch, 64);
@@ -376,7 +400,7 @@ static int run_vector_check(const std::string& dir) {
     bool all_ok = true;
 
     // stage A: cache fill
-    k_cache_fill<<<1, 1>>>(d_cache, d_seed);
+    k_cache_fill<<<1, 1>>>(d_cache, d_seed, CACHE_WORDS);
     cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) {
         fprintf(stderr, "k_cache_fill failed: %s\n", cudaGetErrorString(e));
@@ -399,7 +423,8 @@ static int run_vector_check(const std::string& dir) {
     cudaMemcpy(d_seed_block, seed_block.data(), seed_block.size(),
                cudaMemcpyHostToDevice);
     k_dataset_expand<<<(DATASET_ITEMS + 255) / 256, 256>>>(
-        d_dataset, d_cache, d_seed, d_seed_block);
+        d_dataset, d_cache, d_seed, d_seed_block, DATASET_ITEMS,
+        ITEM_PARENTS);
     e = cudaDeviceSynchronize();
     if (e != cudaSuccess) {
         fprintf(stderr, "k_dataset_expand failed: %s\n", cudaGetErrorString(e));
@@ -461,6 +486,8 @@ static int run_vector_check(const std::string& dir) {
 }
 
 // ---------------------------------------------------------------------------
+#include "fullscale.cuh"
+
 // public API (kept from the skeleton) + CLI
 // ---------------------------------------------------------------------------
 extern "C" {
@@ -492,6 +519,10 @@ int octet_selftest(void) {
 }  // extern "C"
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "full") {
+        std::string outdir = (argc > 2) ? argv[2] : "tests/fullscale";
+        return run_full(outdir);
+    }
     std::string dir = (argc > 2 && std::string(argv[1]) == "vectors")
                           ? argv[2] : "tests/vectors";
     printf("OctetHash CUDA cross-check, vectors: %s\n", dir.c_str());

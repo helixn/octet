@@ -16,9 +16,11 @@
 - **Reference-оракул:** `reference/octet_ref.py` — исполняемая спека,
   stdlib-only, два пути оценки (светлый из кэша / майнерский из датасета),
   профили: `FULL_SCALE` (8 ГБ, документация) и `TEST_PROFILE` (быстрые тесты).
-- **GPU-солвер:** `cuda/octet.cu` + `cuda/Makefile` — скелет: хост-API
-  (`reef_device_count`, `reef_status`, `reef_selftest`) и stubs кернеров
-  (cache-fill, dataset-expand, rekey, search) — реализация в Фазе 1.
+- **GPU-солвер:** `cuda/octet.cu` + `cuda/fullscale.cuh` — этапы A/B/C
+  (BLAKE2b device, cache fill, dataset expand, search) бит-в-байт сверены
+  с оракулом: тест-профиль через `tests/vectors/`, полный масштаб (4 GiB,
+  v0.3 genesis) через `tests/fullscale/` + `tests/verify_fullscale.py`
+  (light-path верификация). Хост-API: `octet_device_count/status/selftest`.
 - **Ворота:** `tests/test_octet_ref.py` (8 тестов: пути совпадают,
   детерминизм, re-key по блоку, tamper, target-search), `conftest.py`
   (sys.path), `scripts/dod_cuda.bat` (nvcc compile-check),
@@ -67,7 +69,10 @@ CI-векторы, будущие кошельки/эксплореры.
 - Будущие кошельки/эксплореры: адрес `oct1…`, формат нот (Tier 2).
 
 ## 7. Зона влияния правок для текущей задачи
-Текущая задача: **Фаза 1 — реализация CUDA-кернеров OctetHash**.
+Текущая задача: **Фаза 1.5 — оптимизация полного масштаба** (профилировка
+поискового кернера: сейчас 71 GB/s эффективных чтений из ~760 пика —
+комpute-bound из-за noinline/launch_bounds; цели: shared-memory BLAKE2b,
+коалесированные чтения, shared states для butterfly).
 - Разрешено менять: `cuda/octet.cu`, `cuda/Makefile` (при необходимости),
   новый генератор векторов (`reference/octet_ref.py` — ТОЛЬКО добавить
   функцию экспорта векторов, без изменения математики),
