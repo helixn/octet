@@ -228,6 +228,99 @@ __global__ void k_dataset_expand(uint8_t* dataset, const uint8_t* cache,
 }
 
 // ---------------------------------------------------------------------------
+// stage C: search — LANES threads in one block; states in shared memory;
+// butterfly partner i ^ (1 << (r % stride_bits)) stays inside the block.
+// Matches reference _solve(): init states, per-round reads (BE addr from the
+// first 4 state bytes), H32(state ‖ item), butterfly XOR, final H32.
+// ---------------------------------------------------------------------------
+__global__ void k_search(const uint8_t* dataset, const uint8_t* header,
+                         uint32_t header_len, uint64_t nonce,
+                         uint8_t* states_out, uint8_t* final_out) {
+    __shared__ uint32_t st[LANES][8];
+    __shared__ uint32_t st2[LANES][8];
+    __shared__ uint8_t seed[32];
+    uint32_t i = threadIdx.x;
+    oct_blake2b s;
+    uint8_t sb[32], tmp[8];
+
+    if (i == 0) {
+        ob_init(&s, 32);
+        ob_update(&s, (const uint8_t*)"octet-pow", 9);
+        ob_update(&s, header, header_len);
+        put_le64(tmp, nonce);
+        ob_update(&s, tmp, 8);
+        ob_final(&s, seed);
+    }
+    __syncthreads();
+
+    ob_init(&s, 32);
+    ob_update(&s, (const uint8_t*)"lane", 4);
+    ob_update(&s, seed, 32);
+    put_le64(tmp, i);
+    ob_update(&s, tmp, 8);
+    ob_final(&s, sb);
+#pragma unroll
+    for (uint32_t k = 0; k < 8; k++)
+        st[i][k] = (uint32_t)sb[4*k] | ((uint32_t)sb[4*k+1] << 8) |
+                   ((uint32_t)sb[4*k+2] << 16) | ((uint32_t)sb[4*k+3] << 24);
+    if (states_out)
+        memcpy(states_out + (uint64_t)i * 32, sb, 32);   // [init]
+    __syncthreads();
+
+    for (uint32_t r = 0; r < ROUNDS; r++) {
+        // read phase: BE integer of the first 4 state bytes mod dataset size
+        uint32_t w0 = st[i][0];
+        uint32_t be = ((w0 & 0xffu) << 24) | ((w0 & 0xff00u) << 8) |
+                      ((w0 & 0xff0000u) >> 8) | ((w0 >> 24) & 0xffu);
+        uint32_t addr = be % DATASET_ITEMS;
+        uint8_t item[256];
+        for (uint32_t t2 = 0; t2 < 256; t2++)
+            item[t2] = dataset[(uint64_t)addr * 256 + t2];
+#pragma unroll
+        for (uint32_t k = 0; k < 8; k++) {
+            sb[4*k]   = (uint8_t)(st[i][k] & 0xffu);
+            sb[4*k+1] = (uint8_t)((st[i][k] >> 8) & 0xffu);
+            sb[4*k+2] = (uint8_t)((st[i][k] >> 16) & 0xffu);
+            sb[4*k+3] = (uint8_t)((st[i][k] >> 24) & 0xffu);
+        }
+        ob_init(&s, 32);
+        ob_update(&s, sb, 32);
+        ob_update(&s, item, 256);
+        ob_final(&s, sb);
+#pragma unroll
+        for (uint32_t k = 0; k < 8; k++)
+            st2[i][k] = (uint32_t)sb[4*k] | ((uint32_t)sb[4*k+1] << 8) |
+                        ((uint32_t)sb[4*k+2] << 16) | ((uint32_t)sb[4*k+3] << 24);
+        __syncthreads();
+        // butterfly (simultaneous: read snapshot st2, write st)
+        uint32_t partner = i ^ (1u << (r % 8));
+#pragma unroll
+        for (uint32_t k = 0; k < 8; k++) st[i][k] = st2[i][k] ^ st2[partner][k];
+        __syncthreads();
+        if (states_out) {
+            uint8_t rec[32];
+#pragma unroll
+            for (uint32_t k = 0; k < 8; k++) {
+                rec[4*k]   = (uint8_t)(st[i][k] & 0xffu);
+                rec[4*k+1] = (uint8_t)((st[i][k] >> 8) & 0xffu);
+                rec[4*k+2] = (uint8_t)((st[i][k] >> 16) & 0xffu);
+                rec[4*k+3] = (uint8_t)((st[i][k] >> 24) & 0xffu);
+            }
+            memcpy(states_out + (uint64_t)(r + 1) * LANES * 32
+                       + (uint64_t)i * 32, rec, 32);
+        }
+    }
+
+    if (i == 0) {
+        // final = H32(concat(states)); shared uint32 LE words == raw bytes
+        oct_blake2b fs;
+        ob_init(&fs, 32);
+        ob_update(&fs, (const uint8_t*)st, LANES * 32);
+        ob_final(&fs, final_out);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // host: vector cross-check
 // ---------------------------------------------------------------------------
 static std::vector<uint8_t> read_bin(const std::string& path) {
@@ -247,10 +340,11 @@ static bool check(const char* name, const uint8_t* got,
     bool ok = (memcmp(got, want.data(), want.size()) == 0);
     printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name);
     if (!ok) {
-        for (size_t i = 0; i < want.size() && i < 32; i++)
+        for (size_t i = 0; i < want.size(); i++)
             if (got[i] != want[i]) {
-                printf("    first diff at byte %zu: got %02x want %02x\n",
-                       i, got[i], want[i]);
+                printf("    first diff at byte %zu (slice %zu): "
+                       "got %02x want %02x\n",
+                       i, i / (LANES * 32), got[i], want[i]);
                 break;
             }
     }
@@ -317,11 +411,52 @@ static int run_vector_check(const std::string& dir) {
     all_ok &= check("dataset expand (k_dataset_expand)", dataset_got.data(),
                     dataset_want);
 
+    // stage C: search — full pipeline integration (reads the GPU-generated
+    // dataset, not the file), states snapshot after every round + final
+    auto states_want = read_bin(dir + "/states.bin");
+    auto final_want  = read_bin(dir + "/final.bin");
+    auto header      = read_bin(dir + "/header.bin");
+    auto nonce_bytes = read_bin(dir + "/nonce.bin");
+    if (states_want.size() != (ROUNDS + 1) * LANES * 32 ||
+        final_want.size() != 32 || nonce_bytes.size() != 8) {
+        fprintf(stderr, "states/final/nonce size mismatch\n");
+        return 2;
+    }
+    uint64_t nonce = 0;
+    for (int b = 7; b >= 0; b--)
+        nonce = (nonce << 8) | nonce_bytes[b];   // le64 decode
+    uint8_t *d_header = nullptr, *d_states = nullptr, *d_final = nullptr;
+    if (cudaMalloc(&d_header, header.size()) != cudaSuccess ||
+        cudaMalloc(&d_states, states_want.size()) != cudaSuccess ||
+        cudaMalloc(&d_final, 32) != cudaSuccess) {
+        fprintf(stderr, "cudaMalloc failed (stage C)\n");
+        return 2;
+    }
+    cudaMemcpy(d_header, header.data(), header.size(), cudaMemcpyHostToDevice);
+    k_search<<<1, LANES>>>(d_dataset, d_header, (uint32_t)header.size(),
+                           nonce, d_states, d_final);
+    e = cudaDeviceSynchronize();
+    if (e != cudaSuccess) {
+        fprintf(stderr, "k_search failed: %s\n", cudaGetErrorString(e));
+        return 1;
+    }
+    std::vector<uint8_t> states_got(states_want.size());
+    std::vector<uint8_t> final_got(32);
+    cudaMemcpy(states_got.data(), d_states, states_got.size(),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(final_got.data(), d_final, 32, cudaMemcpyDeviceToHost);
+    all_ok &= check("search states (k_search, init+8 rounds)",
+                    states_got.data(), states_want);
+    all_ok &= check("search final hash", final_got.data(), final_want);
+
+    cudaFree(d_header);
+    cudaFree(d_states);
+    cudaFree(d_final);
     cudaFree(d_dataset);
     cudaFree(d_seed_block);
     cudaFree(d_cache);
     cudaFree(d_seed);
-    printf("stage A+B: %s\n", all_ok ? "PASS" : "FAIL");
+    printf("stage A+B+C: %s\n", all_ok ? "PASS" : "FAIL");
     return all_ok ? 0 : 1;
 }
 
@@ -337,7 +472,7 @@ int octet_device_count(void) {
 }
 
 const char* octet_status(void) {
-    return "OctetHash CUDA solver v0.1 stage A: BLAKE2b device core + cache fill";
+    return "OctetHash CUDA solver v0.1: BLAKE2b core, cache fill, dataset expand, search (vector-checked)";
 }
 
 int octet_selftest(void) {
@@ -361,6 +496,6 @@ int main(int argc, char** argv) {
                           ? argv[2] : "tests/vectors";
     printf("OctetHash CUDA cross-check, vectors: %s\n", dir.c_str());
     int rc = octet_selftest();
-    if (rc == 0) printf("stage A+B: ALL CHECKS PASSED\n");
+    if (rc == 0) printf("stage A+B+C: ALL CHECKS PASSED\n");
     return rc;
 }
