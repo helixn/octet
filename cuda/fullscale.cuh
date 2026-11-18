@@ -20,6 +20,7 @@
 #define F_LANES         4096u
 #define F_LPB           1024u        // threads per block (lane-group)
 #define F_ROUNDS        16u
+#define OCT_SH_BYTES   (32u * 1024u)  // word-major shared: 8 words x 1024 lanes
 
 // Cache chain chunk: computes cache[start .. start+count) from the previous
 // word (or the tag, when start == 0). Serial by definition of the chain.
@@ -101,22 +102,23 @@ __global__ void k_dataset_chunk(uint8_t* dataset, const uint8_t* cache,
     for (uint32_t i = 0; i < 256; i++) dst[i] = item[i] ^ ks[i];
 }
 
-// Search at full scale: one attempt = F_LPB blocks (lane-groups of 1024).
-// Attempts [att_begin, att_end) are processed; attempt slot s of this launch
-// takes the stride s, s+concurrent, ... within the window. Lane states live
-// in global memory (128 KB per attempt slot); the butterfly partner stays
-// inside the block (stride < 1024), so plain __syncthreads() suffices.
-__global__ void __launch_bounds__(1024) k_search_full(const uint8_t* dataset, const uint8_t* header,
-                              uint32_t header_len, uint64_t nonce_base,
-                              uint32_t concurrent, uint32_t att_begin,
-                              uint32_t att_end, uint8_t* states_buf) {
-    uint32_t g    = blockIdx.x & 3u;      // lane-group of the attempt
-    uint32_t slot = blockIdx.x >> 2;      // attempt slot
-    uint32_t lane = (g << 10) + threadIdx.x;
+// Search at full scale, v2: 256 threads/block, 4 lanes per thread — lane
+// states live in REGISTERS (32 regs), the block covers all 1024 lanes of its
+// lane-group. Butterfly (partner = lane ^ (1 << (r%10)), always inside the
+// group) runs through a single word-major shared buffer (32 KB, no bank
+// conflicts) in three phases: write updated -> read own+partner -> write XOR.
+// No __syncthreads-reachable global state traffic per round.
+__global__ void __launch_bounds__(256, 2)
+k_search_full(const uint8_t* dataset, const uint8_t* header,
+              uint32_t header_len, uint64_t nonce_base, uint32_t concurrent,
+              uint32_t att_begin, uint32_t att_end, uint8_t* states_buf) {
+    extern __shared__ uint32_t sh[];      // word-major: sh[k*1024 + lane]
+    uint32_t g    = blockIdx.x & 3u;
+    uint32_t slot = blockIdx.x >> 2;
+    uint32_t t    = threadIdx.x;          // 0..255
     oct_blake2b s;
-    uint8_t seed[32], sb[32], tmp[8];
-    uint8_t* my = states_buf + (uint64_t)slot * F_LANES * 32
-                + (uint64_t)lane * 32;
+    uint8_t seed[32], tmp[8];
+    uint32_t rst[4][8];                   // register states of the 4 lanes
 
     for (uint64_t att = att_begin + slot; att < att_end; att += concurrent) {
         uint64_t nonce = nonce_base + att;
@@ -126,35 +128,108 @@ __global__ void __launch_bounds__(1024) k_search_full(const uint8_t* dataset, co
         put_le64(tmp, nonce);
         ob_update(&s, tmp, 8);
         ob_final(&s, seed);
-        ob_init(&s, 32);
-        ob_update(&s, (const uint8_t*)"lane", 4);
-        ob_update(&s, seed, 32);
-        put_le64(tmp, lane);
-        ob_update(&s, tmp, 8);
-        ob_final(&s, sb);
-        memcpy(my, sb, 32);
+
+        // init: 4 lane states into registers and shared
+        for (uint32_t j = 0; j < 4; j++) {
+            uint32_t lane = (g << 10) + t * 4u + j;
+            uint8_t sb[32];
+            ob_init(&s, 32);
+            ob_update(&s, (const uint8_t*)"lane", 4);
+            ob_update(&s, seed, 32);
+            put_le64(tmp, lane);
+            ob_update(&s, tmp, 8);
+            ob_final(&s, sb);
+#pragma unroll
+            for (uint32_t k = 0; k < 8; k++) {
+                rst[j][k] = (uint32_t)sb[4*k] | ((uint32_t)sb[4*k+1] << 8) |
+                            ((uint32_t)sb[4*k+2] << 16) |
+                            ((uint32_t)sb[4*k+3] << 24);
+                sh[k * 1024u + t * 4u + j] = rst[j][k];
+            }
+        }
+        if (states_buf)   // [init] snapshot, coalesced (128 B per thread)
+            for (uint32_t j = 0; j < 4; j++) {
+                uint8_t rec[32];
+#pragma unroll
+                for (uint32_t k = 0; k < 8; k++) {
+                    rec[4*k]   = (uint8_t)(rst[j][k] & 0xffu);
+                    rec[4*k+1] = (uint8_t)((rst[j][k] >> 8) & 0xffu);
+                    rec[4*k+2] = (uint8_t)((rst[j][k] >> 16) & 0xffu);
+                    rec[4*k+3] = (uint8_t)((rst[j][k] >> 24) & 0xffu);
+                }
+                uint64_t lane = (uint64_t)(g << 10) + t * 4u + j;
+                memcpy(states_buf + lane * 32, rec, 32);
+            }
         __syncthreads();
 
         for (uint32_t r = 0; r < F_ROUNDS; r++) {
-            uint32_t be = ((uint32_t)my[0] << 24) | ((uint32_t)my[1] << 16) |
-                          ((uint32_t)my[2] << 8) | (uint32_t)my[3];
-            uint32_t addr = be % F_DATASET_ITEMS;
-            ob_init(&s, 32);
-            ob_update(&s, my, 32);
-            // stream the 256 B dataset item straight from global memory —
-            // no per-thread 256 B local buffer (keeps 1024 threads/launchable)
-            ob_update(&s, dataset + (uint64_t)addr * 256, 256);
-            ob_final(&s, sb);
-            memcpy(my, sb, 32);
+            // per-lane: H32(state || item[addr]) — item streamed from global
+            uint32_t nw[4][8];
+            for (uint32_t j = 0; j < 4; j++) {
+                uint32_t be = ((rst[j][0] & 0xffu) << 24) |
+                              ((rst[j][0] & 0xff00u) << 8) |
+                              ((rst[j][0] & 0xff0000u) >> 8) |
+                              ((rst[j][0] >> 24) & 0xffu);
+                uint32_t addr = be % F_DATASET_ITEMS;
+                uint8_t sb2[32];
+#pragma unroll
+                for (uint32_t k = 0; k < 8; k++) {
+                    sb2[4*k]   = (uint8_t)(rst[j][k] & 0xffu);
+                    sb2[4*k+1] = (uint8_t)((rst[j][k] >> 8) & 0xffu);
+                    sb2[4*k+2] = (uint8_t)((rst[j][k] >> 16) & 0xffu);
+                    sb2[4*k+3] = (uint8_t)((rst[j][k] >> 24) & 0xffu);
+                }
+                ob_init(&s, 32);
+                ob_update(&s, sb2, 32);
+                ob_update(&s, dataset + (uint64_t)addr * 256, 256);
+                ob_final(&s, sb2);
+#pragma unroll
+                for (uint32_t k = 0; k < 8; k++)
+                    nw[j][k] = (uint32_t)sb2[4*k] | ((uint32_t)sb2[4*k+1] << 8) |
+                               ((uint32_t)sb2[4*k+2] << 16) |
+                               ((uint32_t)sb2[4*k+3] << 24);
+            }
+
+            // butterfly phase 1: publish updated states (word-major)
+            uint32_t b = r % 10u;
+            for (uint32_t j = 0; j < 4; j++)
+#pragma unroll
+                for (uint32_t k = 0; k < 8; k++)
+                    sh[k * 1024u + t * 4u + j] = nw[j][k];
             __syncthreads();
-            uint32_t partner = lane ^ (1u << (r % 10));
-            const uint8_t* pb = states_buf + (uint64_t)slot * F_LANES * 32
-                              + (uint64_t)partner * 32;
-            uint8_t px[32];
-            memcpy(px, pb, 32);
-            for (uint32_t k = 0; k < 32; k++) my[k] ^= px[k];
+
+            // butterfly phase 2: read own + partner, XOR into registers
+            for (uint32_t j = 0; j < 4; j++) {
+                uint32_t lane = t * 4u + j;
+                uint32_t partner = lane ^ (1u << b);
+#pragma unroll
+                for (uint32_t k = 0; k < 8; k++)
+                    rst[j][k] = nw[j][k] ^ sh[k * 1024u + partner];
+            }
+            __syncthreads();
+
+            // butterfly phase 3: publish the XOR result (overwrite is safe now)
+            for (uint32_t j = 0; j < 4; j++)
+#pragma unroll
+                for (uint32_t k = 0; k < 8; k++)
+                    sh[k * 1024u + t * 4u + j] = rst[j][k];
             __syncthreads();
         }
+
+        // final states of the attempt: registers -> global (coalesced)
+        for (uint32_t j = 0; j < 4; j++) {
+            uint8_t rec[32];
+#pragma unroll
+            for (uint32_t k = 0; k < 8; k++) {
+                rec[4*k]   = (uint8_t)(rst[j][k] & 0xffu);
+                rec[4*k+1] = (uint8_t)((rst[j][k] >> 8) & 0xffu);
+                rec[4*k+2] = (uint8_t)((rst[j][k] >> 16) & 0xffu);
+                rec[4*k+3] = (uint8_t)((rst[j][k] >> 24) & 0xffu);
+            }
+            uint64_t lane = (uint64_t)(g << 10) + t * 4u + j;
+            memcpy(states_buf + lane * 32, rec, 32);
+        }
+        __syncthreads();
     }
 }
 
@@ -277,6 +352,9 @@ static int run_full(const std::string& outdir) {
 
     // 4. search benchmark: concurrent attempts, timed, chunked under TDR
     const uint32_t CONC = 34;
+    cudaFuncSetAttribute(k_search_full,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         OCT_SH_BYTES);
     uint8_t* d_states = nullptr;
     if (cudaMalloc(&d_states, (size_t)CONC * F_LANES * 32) != cudaSuccess) {
         fprintf(stderr, "cudaMalloc failed (states)\n");
@@ -290,9 +368,9 @@ static int run_full(const std::string& outdir) {
          begin += BENCH_CHUNK) {
         uint32_t end = (bench_attempts - begin < BENCH_CHUNK)
                            ? (uint32_t)bench_attempts : begin + BENCH_CHUNK;
-        k_search_full<<<CONC * 4, F_LPB>>>(d_dataset, d_header, header_len,
-                                           nonce_base, CONC, begin, end,
-                                           d_states);
+        k_search_full<<<CONC * 4, 256, OCT_SH_BYTES>>>(
+            d_dataset, d_header, header_len, nonce_base, CONC, begin,
+            end, d_states);
         cudaError_t le = cudaGetLastError();
         if (le != cudaSuccess) {
             fprintf(stderr, "bench launch %u failed: %s\n", begin,
@@ -324,8 +402,8 @@ static int run_full(const std::string& outdir) {
 
     // 5. end-to-end dump: one nonce, states + final, for Python verify
     uint64_t e2e_nonce = 777;
-    k_search_full<<<CONC * 4, F_LPB>>>(d_dataset, d_header, header_len,
-                                       e2e_nonce, CONC, 0, 1, d_states);
+    k_search_full<<<CONC * 4, 256, OCT_SH_BYTES>>>(d_dataset, d_header,
+        header_len, e2e_nonce, CONC, 0, 1, d_states);
     cudaDeviceSynchronize();
     uint8_t* d_final = nullptr;
     cudaMalloc(&d_final, 32);

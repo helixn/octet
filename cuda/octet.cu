@@ -77,7 +77,7 @@ __host__ __device__ __forceinline__ uint64_t rotr64(uint64_t x, int n) {
     return (x >> n) | (x << (64 - n));
 }
 
-__host__ __device__ __noinline__ void b2b_compress(uint64_t h[8], const uint8_t* block, uint64_t t,
+__host__ __device__ void b2b_compress(uint64_t h[8], const uint8_t* block, uint64_t t,
                              int last) {
     uint64_t m[16], v[16];
 #pragma unroll
@@ -123,7 +123,7 @@ typedef struct {
     uint32_t outlen;
 } oct_blake2b;
 
-__host__ __device__ __noinline__ void ob_init(oct_blake2b* s, uint32_t outlen) {
+__host__ __device__ void ob_init(oct_blake2b* s, uint32_t outlen) {
 #pragma unroll
     for (int i = 0; i < 8; i++) s->h[i] = B2B_IV[i];
     s->h[0] ^= 0x01010000u ^ outlen;   // no key, no salt
@@ -132,7 +132,7 @@ __host__ __device__ __noinline__ void ob_init(oct_blake2b* s, uint32_t outlen) {
     s->outlen = outlen;
 }
 
-__host__ __device__ __noinline__ void ob_update(oct_blake2b* s, const uint8_t* in, uint32_t len) {
+__host__ __device__ void ob_update(oct_blake2b* s, const uint8_t* in, uint32_t len) {
     if (len == 0) return;
     uint32_t fill = 128 - s->buflen;
     if (len > fill) {
@@ -151,7 +151,7 @@ __host__ __device__ __noinline__ void ob_update(oct_blake2b* s, const uint8_t* i
     s->buflen += len;
 }
 
-__host__ __device__ __noinline__ void ob_final(oct_blake2b* s, uint8_t* out) {
+__host__ __device__ void ob_final(oct_blake2b* s, uint8_t* out) {
     if (s->buflen > 0 || s->t > 0) {
         for (uint32_t i = s->buflen; i < 128; i++) s->buf[i] = 0;
         s->t += s->buflen;
