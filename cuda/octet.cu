@@ -174,6 +174,60 @@ __global__ void k_cache_fill(uint8_t* cache, const uint8_t* seed_epoch) {
 }
 
 // ---------------------------------------------------------------------------
+// stage B: dataset expansion — one thread per item; effective item =
+// item_base (parent chain over cache) XOR keystream(seed_block). Matches
+// reference dataset_item() + keystream_item() + effective_item().
+// ---------------------------------------------------------------------------
+__global__ void k_dataset_expand(uint8_t* dataset, const uint8_t* cache,
+                                 const uint8_t* seed_epoch,
+                                 const uint8_t* seed_block) {
+    uint32_t j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= DATASET_ITEMS) return;
+    oct_blake2b s;
+    uint8_t acc[64], tmp[8];
+
+    ob_init(&s, 64);
+    ob_update(&s, seed_epoch, 64);
+    put_le64(tmp, j);
+    ob_update(&s, tmp, 8);
+    ob_final(&s, acc);
+
+    for (uint32_t k = 0; k < ITEM_PARENTS; k++) {
+        uint8_t pd[8];
+        ob_init(&s, 8);
+        ob_update(&s, seed_epoch, 64);
+        put_le64(tmp, j);
+        ob_update(&s, tmp, 8);
+        put_le64(tmp, k);
+        ob_update(&s, tmp, 8);
+        ob_final(&s, pd);
+        uint32_t p = (uint32_t)(get_be64(pd) % CACHE_WORDS);
+        ob_init(&s, 64);
+        ob_update(&s, acc, 64);
+        ob_update(&s, cache + (uint64_t)p * 64, 64);
+        ob_final(&s, acc);
+    }
+
+    uint8_t item[256], ks[256];
+    for (uint32_t c = 0; c < 4; c++) {
+        put_le64(tmp, c);
+        ob_init(&s, 64);
+        ob_update(&s, acc, 64);
+        ob_update(&s, tmp, 8);
+        ob_final(&s, item + (uint64_t)c * 64);
+        ob_init(&s, 64);
+        ob_update(&s, seed_block, 64);
+        put_le64(tmp, j);
+        ob_update(&s, tmp, 8);
+        put_le64(tmp, c);
+        ob_update(&s, tmp, 8);
+        ob_final(&s, ks + (uint64_t)c * 64);
+    }
+    uint8_t* dst = dataset + (uint64_t)j * 256;
+    for (uint32_t i = 0; i < 256; i++) dst[i] = item[i] ^ ks[i];
+}
+
+// ---------------------------------------------------------------------------
 // host: vector cross-check
 // ---------------------------------------------------------------------------
 static std::vector<uint8_t> read_bin(const std::string& path) {
@@ -225,6 +279,9 @@ static int run_vector_check(const std::string& dir) {
     cudaMemcpy(d_seed, seed_epoch.data(), seed_epoch.size(),
                cudaMemcpyHostToDevice);
 
+    bool all_ok = true;
+
+    // stage A: cache fill
     k_cache_fill<<<1, 1>>>(d_cache, d_seed);
     cudaError_t e = cudaDeviceSynchronize();
     if (e != cudaSuccess) {
@@ -234,11 +291,38 @@ static int run_vector_check(const std::string& dir) {
     std::vector<uint8_t> cache_got(CACHE_WORDS * 64);
     cudaMemcpy(cache_got.data(), d_cache, cache_got.size(),
                cudaMemcpyDeviceToHost);
-    bool ok = check("cache fill (k_cache_fill)", cache_got.data(), cache_want);
+    all_ok &= check("cache fill (k_cache_fill)", cache_got.data(), cache_want);
+
+    // stage B: dataset expansion (from the GPU-filled cache, not the file)
+    auto dataset_want = read_bin(dir + "/dataset_eff.bin");
+    auto seed_block   = read_bin(dir + "/seed_block.bin");
+    uint8_t *d_dataset = nullptr, *d_seed_block = nullptr;
+    if (cudaMalloc(&d_dataset, DATASET_ITEMS * 256) != cudaSuccess ||
+        cudaMalloc(&d_seed_block, seed_block.size()) != cudaSuccess) {
+        fprintf(stderr, "cudaMalloc failed (stage B)\n");
+        return 2;
+    }
+    cudaMemcpy(d_seed_block, seed_block.data(), seed_block.size(),
+               cudaMemcpyHostToDevice);
+    k_dataset_expand<<<(DATASET_ITEMS + 255) / 256, 256>>>(
+        d_dataset, d_cache, d_seed, d_seed_block);
+    e = cudaDeviceSynchronize();
+    if (e != cudaSuccess) {
+        fprintf(stderr, "k_dataset_expand failed: %s\n", cudaGetErrorString(e));
+        return 1;
+    }
+    std::vector<uint8_t> dataset_got(DATASET_ITEMS * 256);
+    cudaMemcpy(dataset_got.data(), d_dataset, dataset_got.size(),
+               cudaMemcpyDeviceToHost);
+    all_ok &= check("dataset expand (k_dataset_expand)", dataset_got.data(),
+                    dataset_want);
+
+    cudaFree(d_dataset);
+    cudaFree(d_seed_block);
     cudaFree(d_cache);
     cudaFree(d_seed);
-    printf("stage A: %s\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
+    printf("stage A+B: %s\n", all_ok ? "PASS" : "FAIL");
+    return all_ok ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +361,6 @@ int main(int argc, char** argv) {
                           ? argv[2] : "tests/vectors";
     printf("OctetHash CUDA cross-check, vectors: %s\n", dir.c_str());
     int rc = octet_selftest();
-    if (rc == 0) printf("stage A: ALL CHECKS PASSED\n");
+    if (rc == 0) printf("stage A+B: ALL CHECKS PASSED\n");
     return rc;
 }
