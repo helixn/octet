@@ -121,9 +121,12 @@ def block_seed(prev_solution_hash: bytes, height: int) -> bytes:
 
 
 def _solve(header: bytes, nonce: int, cache, seed_epoch: bytes,
-           seed_block: bytes, P: dict, dataset: dict = None):
+           seed_block: bytes, P: dict, dataset: dict = None,
+           states_log: list = None):
     """Core search. dataset=None evaluates the light path (derive every item
-    from cache+keystream); dataset=dict reads precomputed effective items."""
+    from cache+keystream); dataset=dict reads precomputed effective items.
+    states_log (optional): appends the initial lane states and the state
+    array after every round — used only by vector export, never changes math."""
     lanes = P["lanes"]
     rounds = P["rounds"]
     block_lanes = P["lanes_per_block"]
@@ -133,6 +136,8 @@ def _solve(header: bytes, nonce: int, cache, seed_epoch: bytes,
 
     seed = _h(b"octet-pow", header, le64(nonce), size=32)
     states = [_h(b"lane", seed, le64(i), size=32) for i in range(lanes)]
+    if states_log is not None:
+        states_log.append(b"".join(states))
 
     for r in range(rounds):
         # read phase: one uniformly random 256 B dataset item per lane
@@ -152,21 +157,25 @@ def _solve(header: bytes, nonce: int, cache, seed_epoch: bytes,
         states = [bytes(a ^ q for a, q in zip(prev[i],
                                               prev[i ^ (1 << b)]))
                   for i in range(lanes)]
+        if states_log is not None:
+            states_log.append(b"".join(states))
 
     final = _h(b"".join(states), size=32)
     return final
 
 
 def solve(header: bytes, nonce: int, cache, seed_epoch: bytes,
-          seed_block: bytes, P: dict) -> bytes:
+          seed_block: bytes, P: dict, states_log: list = None) -> bytes:
     """Light path: no precomputed dataset (node-verify evaluation)."""
-    return _solve(header, nonce, cache, seed_epoch, seed_block, P)
+    return _solve(header, nonce, cache, seed_epoch, seed_block, P,
+                  states_log=states_log)
 
 
 def solve_with_dataset(header: bytes, nonce: int, dataset: dict,
-                       P: dict) -> bytes:
+                       P: dict, states_log: list = None) -> bytes:
     """Miner path: precomputed effective dataset (must equal solve())."""
-    return _solve(header, nonce, None, b"", b"", P, dataset=dataset)
+    return _solve(header, nonce, None, b"", b"", P, dataset=dataset,
+                  states_log=states_log)
 
 
 def verify(header: bytes, nonce: int, target: bytes, cache,
@@ -191,6 +200,56 @@ def mine(header: bytes, target: bytes, cache, seed_epoch: bytes,
 # CLI: selftest + test-vector generation
 # ---------------------------------------------------------------------------
 
+def export_vectors(outdir: str, header: bytes = b"h0", nonce: int = 7) -> dict:
+    """Phase 2 of cuda-kernel-dev: the protective vector snapshot.
+
+    Exports everything a GPU implementation needs for bit-exact cross-checks,
+    WITHOUT touching the math: cache, effective dataset, lane states (initial
+    + after every round) and the final hash, as flat .bin files + meta.json.
+    Deterministic given (header, nonce) — a committed snapshot must always
+    regenerate byte-identical."""
+    from pathlib import Path
+    P = TEST_PROFILE
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    seed_epoch = epoch_seed(0, b"\x11" * 32)
+    seed_block = block_seed(b"\x22" * 32, 1)
+    cache = gen_cache(seed_epoch, P["cache_words"])
+
+    ds = build_effective_dataset(cache, seed_epoch, P["item_parents"],
+                                 seed_block, P["dataset_items"])
+
+    log = []
+    final = solve(header, nonce, cache, seed_epoch, seed_block, P,
+                  states_log=log)
+    # sanity: miner path must reproduce the same states and final
+    log2 = []
+    final2 = solve_with_dataset(header, nonce, ds, P, states_log=log2)
+    assert final == final2 and log == log2, "paths disagree on vector export"
+
+    (out / "cache.bin").write_bytes(b"".join(cache))
+    (out / "dataset_eff.bin").write_bytes(
+        b"".join(ds[j] for j in range(P["dataset_items"])))
+    (out / "states.bin").write_bytes(b"".join(log))
+    (out / "final.bin").write_bytes(final)
+    (out / "seed_epoch.bin").write_bytes(seed_epoch)
+    (out / "seed_block.bin").write_bytes(seed_block)
+    (out / "header.bin").write_bytes(header)
+    (out / "nonce.bin").write_bytes(le64(nonce))
+    meta = {
+        "profile": P,
+        "header_hex": header.hex(),
+        "nonce": nonce,
+        "states_layout": "[init][after round 0]...[after round R-1], "
+                         f"{P['lanes']} lanes x 32 B each",
+        "final_hex": final.hex(),
+    }
+    (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return {"final": final.hex(), "rounds_logged": len(log),
+            "files": sorted(p.name for p in out.iterdir())}
+
+
 def selftest() -> None:
     P = TEST_PROFILE
     seed_epoch = epoch_seed(0, b"\x11" * 32)
@@ -213,4 +272,8 @@ def selftest() -> None:
 
 
 if __name__ == "__main__":
-    selftest()
+    import sys
+    if len(sys.argv) >= 3 and sys.argv[1] == "export-vectors":
+        print(json.dumps(export_vectors(sys.argv[2]), indent=2))
+    else:
+        selftest()

@@ -1,0 +1,14 @@
+{
+  "profile": {
+    "cache_words": 2048,
+    "dataset_items": 4096,
+    "item_parents": 8,
+    "lanes": 256,
+    "lanes_per_block": 256,
+    "rounds": 8
+  },
+  "header_hex": "6830",
+  "nonce": 7,
+  "states_layout": "[init][after round 0]...[after round R-1], 256 lanes x 32 B each",
+  "final_hex": "617463de72d46987e333f40d65215ccfe2eabfad97ae829190ef99f64e65c65a"
+}
