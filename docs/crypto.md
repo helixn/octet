@@ -21,7 +21,7 @@ exists. Crypto is cheap to choose now and brutal to change later.
   wallets that prefer the most conservative assumptions; larger signatures.
 - **Rejected:** Falcon (floating-point signing → side-channel hazard),
   stateful XMSS/LMS (state-reuse footgun for end users).
-- **Address format:** `oct1…` = Bech32m-style encoding of
+- **Address format:** `vc1…` = Bech32m-style encoding of
   `BLAKE2b-256(ML-DSA public key)`. Public keys are revealed only when spent,
   minimizing the quantum-exposure window of every address.
 

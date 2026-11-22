@@ -1,4 +1,6 @@
-# Octet (OCT)
+# Vice City (VC)
+
+> Бывшая Octet (OCT): бренд-ренейм, алгоритм OctetHash и вся математика unchanged. Адреса: `vc1…` (Bech32m HRP сменился).
 
 A memory-bandwidth PoW cryptocurrency designed for **HBM2-class hardware**.
 
