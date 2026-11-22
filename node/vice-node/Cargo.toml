@@ -2,6 +2,7 @@
 name = "vice-node"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "Vice City (VC) testnet node: chain store, mempool, JSON-RPC, P2P"
 license = "MIT"
 

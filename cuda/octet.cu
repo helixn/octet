@@ -487,6 +487,7 @@ static int run_vector_check(const std::string& dir) {
 
 // ---------------------------------------------------------------------------
 #include "fullscale.cuh"
+#include "mine.cuh"
 
 // public API (kept from the skeleton) + CLI
 // ---------------------------------------------------------------------------
@@ -522,6 +523,11 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "full") {
         std::string outdir = (argc > 2) ? argv[2] : "tests/fullscale";
         return run_full(outdir);
+    }
+    if (argc >= 6 && std::string(argv[1]) == "mine") {
+        return run_mine(argv[2], argv[3], argv[4],
+                        std::strtoull(argv[5], nullptr, 10),
+                        std::strtoull(argv[6], nullptr, 10));
     }
     std::string dir = (argc > 2 && std::string(argv[1]) == "vectors")
                           ? argv[2] : "tests/vectors";

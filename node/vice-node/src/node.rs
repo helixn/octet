@@ -19,6 +19,7 @@ fn now() -> u64 {
 
 pub struct NodeState {
     params: Params,
+    jobs: HashMap<String, Block>,
     datadir: PathBuf,
     cache: Vec<Vec<u8>>,
     seed_epoch: Vec<u8>,
@@ -39,6 +40,7 @@ impl NodeState {
             gen_cache(&seed_epoch, params.profile.cache_words);
         let mut st = NodeState {
             params,
+            jobs: HashMap::new(),
             datadir,
             cache,
             seed_epoch,
@@ -219,14 +221,34 @@ impl NodeState {
         txs.extend(self.mempool.values().cloned());
         let txids: Vec<[u8; 32]> = txs.iter().map(|t| t.txid()).collect();
         let seed_block = block_seed(&self.tip_solution(), height);
+        let mut timestamp = now();
+        if timestamp <= self.mtp() {
+            timestamp = self.mtp() + 1; // must be strictly above MTP
+        }
+        let interval = self.params.retarget_interval.max(1);
+        let target = if height.is_multiple_of(interval) && height > 0 {
+            let tip = self.blocks.last().expect("tip");
+            let tt: [u8; 32] = hex::decode(&tip.header.target)
+                .expect("hex")
+                .try_into()
+                .expect("32 B");
+            let window = timestamp.saturating_sub(self.window_start_ts());
+            hex::encode(vice_core::params::next_target(
+                &tt,
+                window / interval,
+                self.params.block_time_secs,
+            ))
+        } else {
+            self.tip_target()
+        };
         Block {
             header: BlockHeader {
                 version: 1,
                 height,
                 prev_hash: self.tip_hash(),
                 merkle_root: hex::encode(merkle_root(&txids)),
-                timestamp: now(),
-                target: hex::encode(self.params.target),
+                timestamp,
+                target,
                 seed_block: hex::encode(&seed_block),
                 nonce: 0,
                 solution: hex::encode([0u8; 32]),
@@ -235,15 +257,67 @@ impl NodeState {
         }
     }
 
+    /// 2d+: minejob — pin the current template behind a job id so the miner
+    /// can submit a solution for exactly the block it worked on.
+    pub fn minejob(&mut self, coinbase_commit: &str) -> serde_json::Value {
+        let block = self.template(coinbase_commit);
+        let pow_header_hex = hex::encode(block.pow_header());
+        let job_digest = vice_core::addr::blake2b_256(
+            &serde_json::to_vec(&block).expect("serialize"));
+        let job_id = hex::encode(job_digest)[..16].to_string();
+        let target = block.header.target.clone();
+        let seed_block = block.header.seed_block.clone();
+        self.jobs.retain(|_, b| b.header.height == block.header.height);
+        if self.jobs.len() >= 64 {
+            self.jobs.clear(); // memory-DoS guard (gate review N3)
+        }
+        self.jobs.insert(job_id.clone(), block);
+        serde_json::json!({
+            "job_id": job_id,
+            "height": self.height() + 1,
+            "pow_header": pow_header_hex,
+            "seed_block": seed_block,
+            "target": target,
+        })
+    }
+
+    /// 2d+: submit a found solution against the pinned job.
+    pub fn submit_solution(&mut self, job_id: &str, nonce: u64,
+                           solution_hex: &str) -> Result<String, String> {
+        let block = self.jobs.get(job_id).ok_or("unknown/stale job")?.clone();
+        if block.header.height != self.blocks.len() as u64 {
+            return Err("stale job height".into());
+        }
+        let mut block = block;
+        block.header.nonce = nonce;
+        block.header.solution = solution_hex.to_string();
+        let accepted = self.accept_block(block)?;
+        self.jobs.remove(job_id); // consume only on success
+        Ok(accepted)
+    }
+
     /// 2b: validate + accept a block (chain append, broadcast by caller).
     pub fn accept_block(&mut self, block: Block) -> Result<String, String> {
         let height = self.blocks.len() as u64;
+        let tip = self.blocks.last().expect("tip");
+        let tip_target: [u8; 32] = hex::decode(&tip.header.target)
+            .expect("hex target")
+            .try_into()
+            .expect("32 B");
+        let mtp = self.mtp();
+        let window_start_ts = self.window_start_ts();
         let next_utxo = validate_block(
             &block,
             &self.params,
-            height,
-            &self.tip_hash(),
-            &self.tip_solution(),
+            &vice_core::tx::TipContext {
+                height,
+                prev_hash: &self.tip_hash(),
+                tip_solution: &self.tip_solution(),
+                tip_target,
+                mtp,
+                node_now: now(),
+                window_start_ts,
+            },
             &self.utxo,
             &self.cache,
             &self.seed_epoch,
@@ -271,6 +345,31 @@ impl NodeState {
             .filter(|(c, _)| c == commit)
             .map(|(_, a)| a)
             .sum()
+    }
+
+    /// Median of the last 11 block timestamps (inclusive of tip) —
+    /// Bitcoin-style chain-derived time anchor for validation.
+    fn mtp(&self) -> u64 {
+        let n = self.blocks.len();
+        let from = n.saturating_sub(11);
+        let mut ts: Vec<u64> = self.blocks[from..]
+            .iter()
+            .map(|b| b.header.timestamp)
+            .collect();
+        ts.sort_unstable();
+        ts[ts.len() / 2]
+    }
+
+    /// Timestamp of the retarget-window start block (chain data).
+    fn window_start_ts(&self) -> u64 {
+        let interval = self.params.retarget_interval.max(1);
+        let n = self.blocks.len();
+        let idx = n.saturating_sub(interval as usize);
+        self.blocks[idx].header.timestamp
+    }
+
+    pub fn tip_target(&self) -> String {
+        self.blocks.last().map(|b| b.header.target.clone()).unwrap_or_default()
     }
 
     pub fn mempool_len(&self) -> usize {
@@ -345,7 +444,14 @@ impl NodeState {
                     for block in blocks {
                         let height = self.blocks.len() as u64;
                         if block.header.height == height {
-                            let _ = self.accept_block(block);
+                            if let Err(e) = self.accept_block(block) {
+                                eprintln!("p2p: chain block rejected: {e}");
+                            }
+                        } else {
+                            eprintln!(
+                                "p2p: chain skip (height {} != {})",
+                                block.header.height, height
+                            );
                         }
                     }
                 }
@@ -524,6 +630,31 @@ fn route(method: &str, url: &str, body: &str, st: &mut NodeState)
             },
             Err(e) => (400, serde_json::json!({"error": e.to_string()}).to_string()),
         },
+        ("GET", "/api/minejob") => {
+            let commit = q("commit").unwrap_or_else(|| st.miner_commit.clone());
+            (200, st.minejob(&commit).to_string())
+        }
+        ("POST", "/api/submit") => {
+            match serde_json::from_str::<serde_json::Value>(body) {
+                Ok(v) => {
+                    let job = v["job_id"].as_str().unwrap_or("").to_string();
+                    let nonce = v["nonce"].as_u64().unwrap_or(0);
+                    let sol = v["solution"].as_str().unwrap_or("").to_string();
+                    match st.submit_solution(&job, nonce, &sol) {
+                        Ok(id) => {
+                            let m = serde_json::json!({
+                                "type": "block",
+                                "block": st.blocks.last().unwrap().clone(),
+                            });
+                            st.broadcast(&m);
+                            (200, serde_json::json!({"accepted": id}).to_string())
+                        }
+                        Err(e) => (400, serde_json::json!({"error": e}).to_string()),
+                    }
+                }
+                Err(e) => (400, serde_json::json!({"error": e.to_string()}).to_string()),
+            }
+        }
         ("GET", "/api/mempool") => (
             200,
             serde_json::json!({

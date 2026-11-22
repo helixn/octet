@@ -157,6 +157,9 @@ pub enum ValidationError {
     CoinbaseWrongSubsidy { expected: u64, got: u64 },
     CoinbaseHeightMismatch { expected: u64 },
     SeedBlockMismatch { expected: String, got: String },
+    TargetMismatch { expected: String, got: String },
+    TimestampNotMonotonic { mtp: u64, got: u64 },
+    TimestampTooFarFuture { max: u64, got: u64 },
     DoubleSpend,
     UnknownOutpoint,
     BadSignature { input_index: usize },
@@ -165,24 +168,39 @@ pub enum ValidationError {
     BlockTooLarge,
 }
 
-fn hex32(s: &str) -> Option<[u8; 32]> {
-    let raw = hex::decode(s).ok()?;
-    raw.try_into().ok()
-}
-
 /// Validate a block against the current tip (p.chain is the tip header hash).
 /// Recomputes balances implied by the block's txs.
-#[allow(clippy::too_many_arguments)]
+/// Everything the validator needs about the current tip — all on-chain data,
+/// so every node computes identical expectations for the same block.
+pub struct TipContext<'a> {
+    pub height: u64,
+    pub prev_hash: &'a str,
+    pub tip_solution: &'a [u8],
+    pub tip_target: [u8; 32],
+    /// Median of the last 11 block timestamps (chain data, Bitcoin-style):
+    /// the base for the declared timestamp (lower bound + retarget input).
+    pub mtp: u64,
+    /// Node-local clock (Bitcoin-style MAX_FUTURE check): the upper bound is
+    /// node-local because a purely chain-derived bound would make mining
+    /// impossible after any chain idle longer than the bound. Nondeterminism
+    /// is bounded by clock drift (seconds); future-timestamp attacks beyond
+    /// the bound are rejected by every honest node (documented trade-off).
+    pub node_now: u64,
+    /// Timestamp of the retarget-window start block (height−interval) —
+    /// the elapsed time of the window is measured from it.
+    pub window_start_ts: u64,
+}
+
 pub fn validate_block(
     block: &Block,
     params: &Params,
-    height: u64,
-    prev_hash: &str,
-    tip_solution: &[u8],
+    tip: &TipContext,
     utxo: &UtxoSet,
     cache: &[Vec<u8>],
     seed_epoch: &[u8],
 ) -> Result<UtxoSet, ValidationError> {
+    let height = tip.height;
+    let prev_hash = tip.prev_hash;
     let size = serde_json::to_vec(block).map(|v| v.len()).unwrap_or(usize::MAX);
     if size > params.max_block_bytes {
         return Err(ValidationError::BlockTooLarge);
@@ -214,10 +232,47 @@ pub fn validate_block(
     if parse_coinbase_height(&coinbase.inputs[0].prev_txid) != Some(height) {
         return Err(ValidationError::CoinbaseHeightMismatch { expected: height });
     }
+    // timestamp rules (gate C1/C2):
+    // lower bound (chain data, deterministic): ts > MTP(11)
+    // upper bound (Bitcoin-style, node-local): ts <= now + 12 * block_time —
+    // stops future-timestamp difficulty attacks; a purely chain-derived
+    // upper bound would brick mining after any chain idle > bound
+    if block.header.timestamp <= tip.mtp {
+        return Err(ValidationError::TimestampNotMonotonic {
+            mtp: tip.mtp,
+            got: block.header.timestamp,
+        });
+    }
+    let max_ts = tip.node_now + 12 * params.block_time_secs;
+    if block.header.timestamp > max_ts {
+        return Err(ValidationError::TimestampTooFarFuture {
+            max: max_ts,
+            got: block.header.timestamp,
+        });
+    }
+    // header-only retarget continuity BEFORE the expensive light-path solve:
+    // windowed (every retarget_interval blocks), input derived ONLY from
+    // chain data: window elapsed = block ts − window-start ts
+    let expected_target: [u8; 32] = if params.retarget_interval > 0
+        && height.is_multiple_of(params.retarget_interval)
+    {
+        let window = block.header.timestamp.saturating_sub(tip.window_start_ts);
+        crate::params::next_target(&tip.tip_target,
+                                   window / params.retarget_interval.max(1),
+                                   params.block_time_secs)
+    } else {
+        tip.tip_target
+    };
+    if hex::encode(expected_target) != block.header.target {
+        return Err(ValidationError::TargetMismatch {
+            expected: hex::encode(expected_target),
+            got: block.header.target.clone(),
+        });
+    }
     // per-block re-key binding (gate K1): the dataset keystream seed is
     // derived from the parent solution and the new height — a miner cannot
     // pin one dataset across blocks (pow.md §4.3)
-    let expected_seed = crate::pow::block_seed(tip_solution, height);
+    let expected_seed = crate::pow::block_seed(tip.tip_solution, height);
     if hex::encode(&expected_seed) != block.header.seed_block {
         return Err(ValidationError::SeedBlockMismatch {
             expected: hex::encode(&expected_seed),
@@ -247,8 +302,8 @@ pub fn validate_block(
     if hex::encode(&solution) != block.header.solution {
         return Err(ValidationError::PowMismatch);
     }
-    let target = hex32(&block.header.target).ok_or(ValidationError::TargetNotMet)?;
-    if be_cmp(solution.as_slice().try_into().expect("32 B"), &target) {
+    // PoW must meet the (already validated) target
+    if solution.as_slice() > expected_target.as_slice() {
         return Err(ValidationError::TargetNotMet);
     }
     // transactions
@@ -287,18 +342,6 @@ pub fn validate_block(
         }
     }
     Ok(next)
-}
-
-fn be_cmp(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    // true when a > b (target not met)
-    for i in 0..32 {
-        match a[i].cmp(&b[i]) {
-            std::cmp::Ordering::Greater => return true,
-            std::cmp::Ordering::Less => return false,
-            _ => {}
-        }
-    }
-    false
 }
 
 /// Insert outputs with proper indices (called inside apply above — kept as a

@@ -20,17 +20,22 @@ fn vk_of(kp: &vice_core::addr::KeyPair) -> Vec<u8> {
 fn mine_and_submit(state: &Arc<Mutex<vice_node::NodeState>>,
                    commit: &str) -> String {
     let block = state.lock().unwrap().template(commit);
-    // CPU search on the fast profile — target [0xff;32] passes at nonce 0
+    // CPU search on the fast profile against the template's (retargeted)
+    // target — block 1 passes instantly, later blocks may tighten
     let pow_header = block.pow_header();
     let seed_epoch = state.lock().unwrap().seed_epoch();
     let seed_block_bytes =
         hex::decode(&block.header.seed_block).expect("seed");
     let cache = state.lock().unwrap().cache();
+    let target: [u8; 32] = hex::decode(&block.header.target)
+        .expect("hex target")
+        .try_into()
+        .expect("32 B");
     let mut nonce = 0u64;
     let solution = loop {
         let s = vice_core::solve(&pow_header, nonce, &TESTNET.profile, &cache,
                                  &seed_epoch, &seed_block_bytes, None);
-        if s.as_slice() <= TESTNET.target.as_slice() {
+        if s.as_slice() <= target.as_slice() {
             break s;
         }
         nonce += 1;
@@ -84,8 +89,16 @@ fn e2e_chain_mine_tx_sync() {
     assert_eq!(node1.lock().unwrap().mempool_len(), 1);
 
     // block 2 includes the tx; receiver credited, payer spent
+    let pre_window_target = node1.lock().unwrap().tip_target();
     let id2 = mine_and_submit(&node1, &miner_commit);
     assert_eq!(node1.lock().unwrap().height(), 2);
+    // windowed retarget (§9): inside a window the target is unchanged —
+    // it updates only every retarget_interval blocks (live at height 10)
+    assert_eq!(
+        node1.lock().unwrap().tip_target(),
+        pre_window_target,
+        "target must stay flat inside the retarget window"
+    );
     assert_eq!(node1.lock().unwrap().balance(&recv_commit),
                TESTNET.subsidy - 1);
     assert_eq!(node1.lock().unwrap().mempool_len(), 0);

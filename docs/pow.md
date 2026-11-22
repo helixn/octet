@@ -199,6 +199,17 @@ solo-style reward variance control.
 4. `ROUNDS`×`LANES` trade-off: attempt size vs verification cost.
 5. GRINDO: whether to add a second, latency-bound stage (pointer chasing in
    dataset) to further punish non-HBM2 buses — costs verification time.
+7. Retarget quantization dead zone (2d+ review finding): the {1x, 2x, 4x}
+   step model leaves a steady-state band (0.5x, 2x) of block_time uncorrected
+   — mining at ~0.5× block_time keeps the target flat forever (~1.9x
+   emission-rate drift). Candidate fixes: continuous ratio mapping, wider
+   levels, or windowed averaging. Decide before mainnet (pow-spec-review).
+8. Timestamp authority: MTP(11) lower bound + node-local MAX_FUTURE upper
+   bound (Bitcoin-style). Residual risk: a solo producer feeding "+1 s"
+   timestamps tightens the difficulty one window at a time (floor stops a
+   full stop, but difficulty stays elevated until windows average out).
+   Candidate: cap harder-steps per chain-position, or social checkpointing.
+
 6. RAM-mining and botnets (v0.2 review finding; v0.3 lowers the floor):
    the algorithm prices CPU mining ~3–4× worse per attempt than a GPU,
    and v0.3 puts the botnet/ASIC floor at its lowest at genesis (4 GiB
