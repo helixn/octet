@@ -177,7 +177,7 @@ def run_gui() -> None:
                           command=lambda: show(label))
         b.pack(fill="x", padx=12, pady=6)
         nav_buttons[label] = b
-        page_frames[label] = ctk.CTkFrame(pages_host, fg_color=BG)
+        page_frames[label] = ctk.CTkScrollableFrame(pages_host, fg_color=BG)
         return page_frames[label]
 
     page_wallet = add_nav("💰  Кошелёк")
@@ -307,8 +307,10 @@ def run_gui() -> None:
                                "восстановить из файла кошелька. Никому их "
                                "не показывай.",
                      text_color=RED, font=("Consolas", 12)).pack(pady=2)
-        grid = ctk.CTkFrame(dlg, fg_color=PANEL, corner_radius=14)
-        grid.pack(padx=24, pady=12, fill="both", expand=True)
+        dlg_scroll = ctk.CTkScrollableFrame(dlg, fg_color=BG, height=420)
+        dlg_scroll.pack(fill="both", expand=True, padx=12, pady=8)
+        grid = ctk.CTkFrame(dlg_scroll, fg_color=PANEL, corner_radius=14)
+        grid.pack(padx=12, pady=8, fill="x")
 
         def render_words():
             for w in grid.winfo_children():
@@ -336,8 +338,9 @@ def run_gui() -> None:
                         variable=wrote, checkbox_width=22,
                         checkbox_height=22, fg_color=PINK).pack(pady=6)
 
-        verify_row = ctk.CTkFrame(dlg, fg_color=PANEL2, corner_radius=12)
-        verify_row.pack(fill="x", padx=24, pady=6)
+        verify_row = ctk.CTkFrame(dlg_scroll, fg_color=PANEL2,
+                                  corner_radius=12)
+        verify_row.pack(fill="x", padx=12, pady=6)
         picks = sorted(_rnd.sample(range(24), 3))
         checks = []
         ctk.CTkLabel(verify_row, text="Проверка — введи слова №",
@@ -487,11 +490,11 @@ def run_gui() -> None:
                  text_color=DIM, font=("Consolas", 11)).pack(
         anchor="w", padx=20, pady=(2, 12))
 
-    log = ctk.CTkTextbox(mf, height=170, fg_color="#0d0a20",
+    log = ctk.CTkTextbox(mf, height=210, fg_color="#0d0a20",
                          font=("Consolas", 11), text_color=CYAN,
                          border_width=1, border_color=BORDER,
                          corner_radius=14)
-    log.pack(fill="both", expand=True, padx=8, pady=6)
+    log.pack(fill="x", padx=8, pady=6)
     log.insert("0.0", "== Vice City miner console ==\n")
 
     miner_state = {"stop": threading.Event()}
