@@ -53,7 +53,7 @@
 Ни одна задача не считается выполненной, пока все команды подряд не вернули код 0:
 1. `python -m pytest tests/ -q`
 2. `scripts/dod_cuda.bat` (Windows) / `make -C cuda compile-only` (Linux/CI)
-3. Фаза 1+ (после появления ноды): `cargo clippy --workspace -- -D warnings && cargo test --workspace`
+3. Нода (node/): `cargo clippy --release --workspace -- -D warnings && cargo test --release --workspace` — консенсусные векторы бит-в-байт
 
 Зелёный pytest ≠ сдача. Задачи по спеке приёмка — только через рубрику
 `orchestration/templates/gate-rubric.md`.

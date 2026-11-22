@@ -28,3 +28,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit
       - name: Compile CUDA skeleton
         run: make -C cuda compile-only
+
+  rust-consensus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: clippy (strict)
+        run: cargo clippy --release --workspace -- -D warnings
+        working-directory: node
+      - name: consensus tests — bit-exact vs the Python oracle
+        run: cargo test --release --workspace
+        working-directory: node

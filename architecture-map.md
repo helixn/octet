@@ -21,6 +21,10 @@
   с оракулом: тест-профиль через `tests/vectors/`, полный масштаб (4 GiB,
   v0.3 genesis) через `tests/fullscale/` + `tests/verify_fullscale.py`
   (light-path верификация). Хост-API: `octet_device_count/status/selftest`.
+- **Нода (Фаза 2a):** `node/vice-core` — светлый путь OctetHash на Rust
+  (verify для консенсуса). Тройной оракул: Python ≡ CUDA ≡ Rust —
+  тесты читают те же committed-векторы (`tests/vectors/`,
+  `tests/fullscale/full_final.bin`). clippy -D warnings в воротах.
 - **Ворота:** `tests/test_octet_ref.py` (8 тестов: пути совпадают,
   детерминизм, re-key по блоку, tamper, target-search), `conftest.py`
   (sys.path), `scripts/dod_cuda.bat` (nvcc compile-check),
