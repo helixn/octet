@@ -183,11 +183,20 @@ def run_gui() -> None:
                     fg_color=CYAN).pack(side="left", padx=10, pady=10)
     ctk.CTkLabel(cpurow, text="Ядра:", text_color=TEXT_DIM).pack(side="left",
                                                                  padx=(16, 6))
-    cores = ctk.CTkSpinBox(cpurow, width=80,
-                           from_=1, to=mining_core.cpu_count())
-    cores.set(min(cfg.get("cpu_cores", mining_core.cpu_count()),
-                  mining_core.cpu_count()))
+    total_cores = mining_core.cpu_count()
+    cores_val = ctk.StringVar(
+        value=str(min(cfg.get("cpu_cores", total_cores), total_cores)))
+
+    def _show_cores(v):
+        cores_val.set(str(int(float(v))))
+    cores = ctk.CTkSlider(cpurow, from_=1, to=total_cores,
+                          number_of_steps=total_cores - 1, width=180,
+                          button_color=PINK, progress_color="#d11f7a",
+                          command=_show_cores)
+    cores.set(min(cfg.get("cpu_cores", total_cores), total_cores))
     cores.pack(side="left")
+    ctk.CTkLabel(cpurow, textvariable=cores_val, text_color=CYAN,
+                 width=34).pack(side="left")
 
     mrow = ctk.CTkFrame(mf, fg_color=PANEL, corner_radius=12)
     mrow.pack(fill="x", padx=18, pady=6)
@@ -215,7 +224,7 @@ def run_gui() -> None:
         cfg["gpu_enabled"] = {k: v.get() for k, v in gpu_vars.items()}
         cfg["gpu_power_limit"] = {k: v.get() for k, v in pl_vars.items()}
         cfg["cpu_mining"] = cpu_var.get()
-        cfg["cpu_cores"] = int(cores.get())
+        cfg["cpu_cores"] = int(cores_val.get())
         mining_core.save_config(cfg)
 
     def on_line(line):
