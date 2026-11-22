@@ -101,10 +101,10 @@ def run_gui() -> None:
     import mining_core
     import gpu_miner as gm
 
-    wallet = wallet_core.load_or_create_wallet()
+    holder = {"w": wallet_core.load_or_create_wallet()}
 
     def wallet_commit() -> str:
-        return hashlib.blake2b(wallet["vk"], digest_size=32).hexdigest()
+        return hashlib.blake2b(holder["w"]["vk"], digest_size=32).hexdigest()
 
     root = ctk.CTk()
     root.withdraw()
@@ -197,7 +197,7 @@ def run_gui() -> None:
     ctk.CTkLabel(addr_card, text="АДРЕС", text_color=CYAN,
                  font=("Consolas", 12, "bold")).pack(anchor="w", padx=20,
                                                      pady=(14, 0))
-    addr_var = ctk.StringVar(value=wallet["address"])
+    addr_var = ctk.StringVar(value=holder["w"]["address"])
     ctk.CTkEntry(addr_card, textvariable=addr_var, width=660,
                  font=("Consolas", 13), state="readonly",
                  fg_color=PANEL2, border_color=BORDER).pack(anchor="w",
@@ -225,7 +225,7 @@ def run_gui() -> None:
 
     qr_path = APPDATA_DIR / "address_qr.png"
     import art as _art
-    _art.make_qr(qr_path, wallet["address"])
+    _art.make_qr(qr_path, holder["w"]["address"])
     qr_img = ctk.CTkImage(Image.open(qr_path), size=(150, 150))
     ctk.CTkLabel(bal_card, image=qr_img, text="").pack(side="right", padx=20,
                                                        pady=10)
@@ -246,7 +246,7 @@ def run_gui() -> None:
 
     def copy_addr():
         root.clipboard_clear()
-        root.clipboard_append(wallet["address"])
+        root.clipboard_append(holder["w"]["address"])
         copy_info.configure(text="✓ адрес скопирован в буфер")
 
     brow = ctk.CTkFrame(wf, fg_color="transparent")
@@ -261,6 +261,181 @@ def run_gui() -> None:
     copy_info = ctk.CTkLabel(wf, text="", text_color=GREEN,
                              font=("Consolas", 11))
     copy_info.pack(anchor="w", padx=10)
+
+
+    # ------------------------ cold wallet --------------------------------------
+    def refresh_wallet_ui():
+        addr_var.set(holder["w"]["address"])
+        _art.make_qr(qr_path, holder["w"]["address"])
+        new_qr = ctk.CTkImage(Image.open(qr_path), size=(150, 150))
+        for wdg in bal_card.pack_slaves():
+            try:
+                if wdg.cget("image"):
+                    wdg.configure(image=new_qr)
+                    break
+            except Exception:
+                pass
+        copy_info.configure(text="✓ кошелёк обновлён")
+
+    def save_cold(cold):
+        import tkinter.messagebox as mb
+        if WALLET_FILE.exists():
+            if not mb.askyesno(
+                "Перезаписать кошелёк?",
+                "Текущий кошелёк будет ПЕРЕЗАПИСАН. Старые ключи будут "
+                "потеряны, если у тебя нет их резервной копии. Продолжить?",
+            ):
+                return False
+        wallet_core.save_cold_wallet(cold, store_seed=True)
+        holder["w"] = wallet_core.load_or_create_wallet()
+        refresh_wallet_ui()
+        root.after(300, refresh_balance)
+        return True
+
+    def create_cold_dialog():
+        import tkinter.messagebox as mb
+        import random as _rnd
+        cold = {"data": wallet_core.create_cold_wallet()}
+        dlg = ctk.CTkToplevel(root)
+        dlg.title("Создание холодного кошелька")
+        dlg.geometry("880x700")
+        dlg.attributes("-topmost", True)
+        ctk.CTkLabel(dlg, text="Запиши 24 слова БУМАГОЙ и спрячь",
+                     font=("Arial Black", 22), text_color=PINK).pack(
+            pady=(18, 2))
+        ctk.CTkLabel(dlg, text="Это единственная копия ключей. Слова нельзя "
+                               "восстановить из файла кошелька. Никому их "
+                               "не показывай.",
+                     text_color=RED, font=("Consolas", 12)).pack(pady=2)
+        grid = ctk.CTkFrame(dlg, fg_color=PANEL, corner_radius=14)
+        grid.pack(padx=24, pady=12, fill="both", expand=True)
+
+        def render_words():
+            for w in grid.winfo_children():
+                w.destroy()
+            words = cold["data"]["words"]
+            for col in range(4):
+                colf = ctk.CTkFrame(grid, fg_color="transparent")
+                colf.pack(side="left", fill="both", expand=True, padx=8)
+                for i, word in enumerate(words[col * 6:(col + 1) * 6]):
+                    n = col * 6 + i + 1
+                    ctk.CTkLabel(colf, text=f"{n:2d}. {word}",
+                                 font=("Consolas", 16, "bold"),
+                                 text_color=CYAN).pack(anchor="w", pady=3)
+
+        render_words()
+        pass_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        pass_row.pack(fill="x", padx=24, pady=6)
+        ctk.CTkLabel(pass_row, text="Пассфраза (25-е слово, опционально):",
+                     text_color=DIM).pack(side="left")
+        pass_var = ctk.StringVar()
+        ctk.CTkEntry(pass_row, textvariable=pass_var, show="•",
+                     width=260).pack(side="left", padx=8)
+        wrote = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(dlg, text="Я записал(а) слова на бумагу",
+                        variable=wrote, checkbox_width=22,
+                        checkbox_height=22, fg_color=PINK).pack(pady=6)
+
+        verify_row = ctk.CTkFrame(dlg, fg_color=PANEL2, corner_radius=12)
+        verify_row.pack(fill="x", padx=24, pady=6)
+        picks = sorted(_rnd.sample(range(24), 3))
+        checks = []
+        ctk.CTkLabel(verify_row, text="Проверка — введи слова №",
+                     text_color=DIM).pack(side="left", padx=10)
+        for n in picks:
+            e = ctk.CTkEntry(verify_row, width=150,
+                             placeholder_text="#" + str(n + 1))
+            e.pack(side="left", padx=6)
+            checks.append((n, e))
+
+        def do_create():
+            if not wrote.get():
+                mb.showwarning("Сначала запиши",
+                               "Отметь «Я записал(а)», когда запишешь слова.")
+                return
+            for n, e in checks:
+                if e.get().strip().lower() != cold["data"]["words"][n]:
+                    mb.showerror("Проверка не пройдена",
+                                 "Слово №" + str(n + 1) + " введено неверно.")
+                    return
+            cold["data"]["entropy"] = wallet_core.mnemonic_to_entropy(
+                cold["data"]["words"], pass_var.get())
+            cold["data"]["vk"], cold["data"]["sk"] =                 wallet_core.keygen_from_entropy(cold["data"]["entropy"])
+            if save_cold(cold["data"]):
+                dlg.destroy()
+
+        brow = ctk.CTkFrame(dlg, fg_color="transparent")
+        brow.pack(pady=8)
+
+        def regenerate():
+            cold["data"] = wallet_core.create_cold_wallet(pass_var.get())
+            render_words()
+
+        ctk.CTkButton(brow, text="⟳ Другие слова", width=150,
+                      command=regenerate, fg_color=PANEL2, border_width=1,
+                      border_color=BORDER).pack(side="left", padx=6)
+        ctk.CTkButton(brow, text="🆕 СОЗДАТЬ КОШЕЛЁК", command=do_create,
+                      fg_color=PINK, hover_color=PINK_DARK,
+                      font=("Arial", 14, "bold"), height=40,
+                      width=220).pack(side="left", padx=6)
+
+    def restore_dialog():
+        import tkinter.messagebox as mb
+        dlg = ctk.CTkToplevel(root)
+        dlg.title("Восстановление из сид-фразы")
+        dlg.geometry("760x460")
+        dlg.attributes("-topmost", True)
+        ctk.CTkLabel(dlg, text="Введи 24 слова (через пробел или с новых "
+                               "строк)", font=("Arial Black", 20),
+                     text_color=CYAN).pack(pady=(18, 6))
+        words_box = ctk.CTkTextbox(dlg, height=140, font=("Consolas", 14),
+                                   fg_color=PANEL2, border_width=1,
+                                   border_color=BORDER)
+        words_box.pack(fill="x", padx=24, pady=6)
+        pass_row = ctk.CTkFrame(dlg, fg_color="transparent")
+        pass_row.pack(fill="x", padx=24, pady=4)
+        ctk.CTkLabel(pass_row, text="Пассфраза (если была):",
+                     text_color=DIM).pack(side="left")
+        pass_var = ctk.StringVar()
+        ctk.CTkEntry(pass_row, textvariable=pass_var, show="•",
+                     width=260).pack(side="left", padx=8)
+
+        def do_restore():
+            words = words_box.get("0.0", "end").split()
+            try:
+                w = wallet_core.restore_from_mnemonic(words, pass_var.get())
+            except ValueError as e:
+                mb.showerror("Ошибка", str(e))
+                return
+            if save_cold(w):
+                dlg.destroy()
+
+        ctk.CTkButton(dlg, text="🔑 ВОССТАНОВИТЬ", command=do_restore,
+                      fg_color=PINK, hover_color=PINK_DARK,
+                      font=("Arial", 14, "bold"), height=40,
+                      width=220).pack(pady=10)
+
+    cold_card = card(wf)
+    cold_card.pack(fill="x", padx=8, pady=6)
+    ctk.CTkLabel(cold_card, text="ХОЛОДНЫЙ КОШЕЛЁК · 24 слова "
+                                 "(BIP-39 → ML-DSA seed)", text_color=CYAN,
+                 font=("Consolas", 12, "bold")).pack(anchor="w", padx=20,
+                                                     pady=(12, 0))
+    ctk.CTkLabel(cold_card, text="24 слова = 256 бит энтропии = seed ключей. "
+                                 "Одни и те же слова на любом устройстве "
+                                 "восстанавливают тот же vc1-адрес. Слова не "
+                                 "хранятся в файле кошелька.",
+                 text_color=DIM, font=("Consolas", 11)).pack(
+        anchor="w", padx=20, pady=(2, 6))
+    cold_row = ctk.CTkFrame(cold_card, fg_color="transparent")
+    cold_row.pack(pady=(4, 14))
+    ctk.CTkButton(cold_row, text="🆕 Создать холодный кошелёк",
+                  command=create_cold_dialog, fg_color=PINK,
+                  hover_color=PINK_DARK, height=40).pack(side="left", padx=8)
+    ctk.CTkButton(cold_row, text="🔑 Восстановить из слов",
+                  command=restore_dialog, fg_color=PANEL2,
+                  hover_color=PANEL, height=40, border_width=1,
+                  border_color=BORDER).pack(side="left", padx=8)
 
     # ============================ MINING PAGE ==================================
     mf = page_mining

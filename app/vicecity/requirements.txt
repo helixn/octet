@@ -3,3 +3,4 @@ pillow>=10
 pyinstaller>=6
 dilithium-py>=1.5
 qrcode>=8
+mnemonic>=0.20
