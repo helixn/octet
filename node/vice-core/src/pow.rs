@@ -150,11 +150,6 @@ pub fn solve(header: &[u8], nonce: u64, p: &Profile, cache: &[Vec<u8>],
 pub fn verify(header: &[u8], nonce: u64, target: &[u8], p: &Profile,
               cache: &[Vec<u8>], seed_epoch: &[u8], seed_block: &[u8]) -> bool {
     let final_hash = solve(header, nonce, p, cache, seed_epoch, seed_block, None);
-    let f = be_bytes(&final_hash);
-    let t = be_bytes(target);
-    f <= t
-}
-
-fn be_bytes(v: &[u8]) -> Vec<u8> {
-    v.iter().rev().cloned().collect()
+    // big-endian numeric compare, same as the oracle's int.from_bytes(...,"big")
+    final_hash.as_slice() <= target
 }

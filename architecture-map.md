@@ -21,10 +21,14 @@
   с оракулом: тест-профиль через `tests/vectors/`, полный масштаб (4 GiB,
   v0.3 genesis) через `tests/fullscale/` + `tests/verify_fullscale.py`
   (light-path верификация). Хост-API: `octet_device_count/status/selftest`.
-- **Нода (Фаза 2a):** `node/vice-core` — светлый путь OctetHash на Rust
-  (verify для консенсуса). Тройной оракул: Python ≡ CUDA ≡ Rust —
-  тесты читают те же committed-векторы (`tests/vectors/`,
-  `tests/fullscale/full_final.bin`). clippy -D warnings в воротах.
+- **Нода (Фаза 2):** `node/vice-core` — PoW light-path + ML-DSA-65
+  подписи, vc1-адреса (bech32m реализован вручную: крейт bech32 0.11
+  давал расходящийся checksum — поймал golden-тест Python↔Rust↔JS),
+  транзакции/блоки/UTXO/validate_block (seed_block enforce, BIP-34
+  height-commitment в coinbase, pinned genesis). `node/vice-node` —
+  vicd: mempool, JSON-RPC (:9332), p2p (:9333), broadcast/sync.
+  Тестнет = TEST_PROFILE; mainnet = FULL_SCALE 4 ГиБ (retarget — до
+  запуска, gate K5). Тройной оракул: Python ≡ CUDA ≡ Rust.
 - **Ворота:** `tests/test_octet_ref.py` (8 тестов: пути совпадают,
   детерминизм, re-key по блоку, tamper, target-search), `conftest.py`
   (sys.path), `scripts/dod_cuda.bat` (nvcc compile-check),
@@ -48,7 +52,7 @@
 | Элемент датасета | цепочка из 32 родителей кэша, 4×64 Б = 256 Б | pow.md §4.2 |
 | Re-key блока | `item_eff = item_base ⊕ keystream(seed_block)` | pow.md §4.3 |
 | Поиск | 4096 полос × 16 раундов × 256 Б + butterfly | pow.md §5 |
-| Адрес | `oct1… = Bech32m(BLAKE2b-256(ML-DSA pk))` | crypto.md §2 |
+| Адрес | `vc1… = Bech32m(BLAKE2b-256(ML-DSA-65 vk))` (golden-тест Python↔Rust) | crypto.md §2 |
 | Уровни приватности | Tier 1 (KEM stealth) → Tier 2 (ноты без zk) → Tier 3 (PQ-SNARK, research) | crypto.md §3 |
 
 Потребители контрактов: будущая нода на Rust (Фаза 1+), CUDA-солвер,

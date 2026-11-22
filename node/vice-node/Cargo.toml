@@ -1,0 +1,21 @@
+[package]
+name = "vice-node"
+version = "0.1.0"
+edition = "2021"
+description = "Vice City (VC) testnet node: chain store, mempool, JSON-RPC, P2P"
+license = "MIT"
+
+[dependencies]
+vice-core = { path = "../vice-core" }
+hex = "0.4"
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "vice_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vicd"
+path = "src/main.rs"
