@@ -16,3 +16,4 @@ bench-native/
 *.o
 build/
 *.spec.bak
+node/target/
