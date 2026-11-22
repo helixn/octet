@@ -142,3 +142,71 @@ def ensure_assets() -> tuple[Path, Path]:
 if __name__ == "__main__":
     s, i = ensure_assets()
     print("assets:", s, i)
+
+
+def make_banner(path: Path, w: int = 980, h: int = 170):
+    """Wide header banner: island sunset + neon coin + wordmark."""
+    img = _vgrad(w, h, [
+        (24, 10, 52), (66, 16, 96), (146, 32, 122),
+        (232, 62, 110), (255, 128, 66),
+    ])
+    d = ImageDraw.Draw(img)
+    # sun + sea line
+    d.ellipse([w // 2 - 46, h - 60 - 46, w // 2 + 46, h - 60 + 46],
+              fill=(255, 226, 130))
+    d.rectangle([0, h - 48, w, h], fill=(38, 16, 74))
+    for i, yy in enumerate(range(h - 44, h, 9)):
+        xx = w // 2 + (-1) ** i * 6
+        d.line([(xx - 60, yy), (xx + 60, yy)], fill=(255, 150, 90), width=2)
+    d.line([(0, h - 49), (w, h - 49)], fill=(255, 90, 120), width=3)
+    _palm(d, 70, h - 52, 0.72, (10, 6, 30))
+    _palm(d, w - 74, h - 52, 0.72, (10, 6, 30))
+    _coin(d, 148, h // 2 - 4, 44)
+    f1 = _font(44)
+    d.text((226, h // 2 - 22), "VICE CITY", font=f1, fill=(255, 45, 149),
+           stroke_width=3, stroke_fill=(10, 5, 30))
+    f2 = _font(15, bold=False)
+    d.text((228, h // 2 + 16), "The Paradise Coin · OctetHash PoW · ML-DSA-65",
+           font=f2, fill=(0, 230, 255))
+    img.save(path)
+    return img
+
+
+def make_coin_png(path: Path, size: int = 96):
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    _coin(d, size // 2, size // 2, int(size * 0.42))
+    img.save(path)
+
+
+def make_qr(path: Path, text: str, size: int = 190):
+    import qrcode
+    qr = qrcode.QRCode(border=1, box_size=6)
+    qr.add_data(text)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="#0b0a18", back_color=(255, 196, 40))
+    img = img.convert("RGB").resize((size, size), Image.NEAREST)
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, size - 1, size - 1], outline=(255, 45, 149), width=4)
+    img.save(path)
+
+
+def ensure_all(banner_size=(980, 170)) -> dict:
+    ASSETS.mkdir(parents=True, exist_ok=True)
+    splash = ASSETS / "splash.png"
+    icon = ASSETS / "icon.ico"
+    banner = ASSETS / "banner.png"
+    coin = ASSETS / "coin.png"
+    if not splash.exists():
+        make_splash(splash)
+    if not icon.exists():
+        make_icon(icon)
+    if not banner.exists() or banner_size != (980, 170):
+        make_banner(banner, *banner_size)
+    if not coin.exists():
+        make_coin_png(coin)
+    return {"splash": splash, "icon": icon, "banner": banner, "coin": coin}
+
+
+if __name__ == "__main__":
+    print(ensure_all())

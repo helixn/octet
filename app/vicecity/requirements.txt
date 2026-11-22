@@ -2,3 +2,4 @@ customtkinter>=6.0
 pillow>=10
 pyinstaller>=6
 dilithium-py>=1.5
+qrcode>=8
