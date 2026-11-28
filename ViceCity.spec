@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('app/vicecity/assets', 'vicecity_assets')]
 binaries = []
-hiddenimports = ['wallet_core', 'mining_core', 'art', 'gpu_miner', 'dilithium_py.ml_dsa']
+hiddenimports = ['wallet_core', 'mining_core', 'art', 'gpu_miner', 'pool', 'theme', 'psutil_free_specs', 'dilithium_py.ml_dsa']
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('qrcode')

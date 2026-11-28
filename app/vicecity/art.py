@@ -144,12 +144,24 @@ if __name__ == "__main__":
     print("assets:", s, i)
 
 
-def make_banner(path: Path, w: int = 980, h: int = 170):
+COVER_PALETTES = {
+    "sunset": [(24, 10, 52), (66, 16, 96), (146, 32, 122),
+               (232, 62, 110), (255, 128, 66)],
+    "ocean":  [(2, 8, 32), (6, 24, 70), (10, 58, 130), (24, 110, 190),
+               (90, 180, 230)],
+    "aurora": [(6, 10, 16), (10, 30, 34), (16, 70, 60), (60, 160, 110),
+               (140, 230, 160)],
+    "noir":   [(8, 7, 5), (24, 20, 12), (52, 40, 16), (110, 84, 22),
+               (180, 140, 40)],
+    "sakura": [(30, 12, 26), (66, 20, 52), (128, 36, 82), (220, 80, 130),
+               (255, 150, 180)],
+}
+
+
+def make_banner(path: Path, w: int = 980, h: int = 170,
+                palette: str = "sunset"):
     """Wide header banner: island sunset + neon coin + wordmark."""
-    img = _vgrad(w, h, [
-        (24, 10, 52), (66, 16, 96), (146, 32, 122),
-        (232, 62, 110), (255, 128, 66),
-    ])
+    img = _vgrad(w, h, COVER_PALETTES.get(palette, COVER_PALETTES["sunset"]))
     d = ImageDraw.Draw(img)
     # sun + sea line
     d.ellipse([w // 2 - 46, h - 60 - 46, w // 2 + 46, h - 60 + 46],
@@ -163,11 +175,14 @@ def make_banner(path: Path, w: int = 980, h: int = 170):
     _palm(d, w - 74, h - 52, 0.72, (10, 6, 30))
     _coin(d, 148, h // 2 - 4, 44)
     f1 = _font(44)
-    d.text((226, h // 2 - 22), "VICE CITY", font=f1, fill=(255, 45, 149),
+    accent_text = tuple(min(255, c + 90) for c in
+                        COVER_PALETTES.get(palette,
+                                           COVER_PALETTES["sunset"])[3])
+    d.text((226, h // 2 - 22), "VICE CITY", font=f1, fill=accent_text,
            stroke_width=3, stroke_fill=(10, 5, 30))
     f2 = _font(15, bold=False)
     d.text((228, h // 2 + 16), "The Paradise Coin · OctetHash PoW · ML-DSA-65",
-           font=f2, fill=(0, 230, 255))
+           font=f2, fill=(230, 230, 240))
     img.save(path)
     return img
 
@@ -191,18 +206,18 @@ def make_qr(path: Path, text: str, size: int = 190):
     img.save(path)
 
 
-def ensure_all(banner_size=(980, 170)) -> dict:
+def ensure_all(banner_size=(980, 170), palette: str = "sunset") -> dict:
     ASSETS.mkdir(parents=True, exist_ok=True)
     splash = ASSETS / "splash.png"
     icon = ASSETS / "icon.ico"
-    banner = ASSETS / "banner.png"
+    banner = ASSETS / ("banner_" + palette + ".png")
     coin = ASSETS / "coin.png"
     if not splash.exists():
         make_splash(splash)
     if not icon.exists():
         make_icon(icon)
     if not banner.exists() or banner_size != (980, 170):
-        make_banner(banner, *banner_size)
+        make_banner(banner, *banner_size, palette=palette)
     if not coin.exists():
         make_coin_png(coin)
     return {"splash": splash, "icon": icon, "banner": banner, "coin": coin}
