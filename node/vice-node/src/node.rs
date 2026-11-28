@@ -463,14 +463,19 @@ impl NodeState {
         }
     }
 
-    /// 2d: p2p listener thread (length-prefixed JSON messages).
+    /// 2d: p2p listener (length-prefixed JSON messages). Binds SYNCHRONOUSLY
+    /// so the port is guaranteed open when this returns — callers can then
+    /// connect immediately (CI-runner race found by the sync test).
     pub fn start_p2p(state: Arc<Mutex<Self>>, port: u16) {
-        std::thread::spawn(move || {
-            let Ok(listener) = TcpListener::bind(("0.0.0.0", port)) else {
+        let listener = match TcpListener::bind(("0.0.0.0", port)) {
+            Ok(l) => l,
+            Err(_) => {
                 eprintln!("p2p: cannot bind port {port}");
                 return;
-            };
-            println!("p2p listening on {port}");
+            }
+        };
+        println!("p2p listening on {port}");
+        std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(stream) = conn else { continue };
                 let state = Arc::clone(&state);
