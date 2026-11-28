@@ -23,7 +23,7 @@ if errorlevel 1 (
 )
 
 nvcc -O3 -std=c++17 -Wno-deprecated-gpu-targets ^
-     -gencode arch=compute_70,code=sm_70 -gencode arch=compute_86,code=sm_86 ^
+     -gencode arch=compute_70,code=sm_70 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_120,code=sm_120 -gencode arch=compute_86,code=compute_86 ^
      cuda\octet.cu -o cuda\octet_test.exe
 if errorlevel 1 (
     echo ERROR: build FAILED

@@ -23,7 +23,7 @@ if errorlevel 1 (
 )
 
 nvcc -std=c++17 -Wno-deprecated-gpu-targets ^
-     -gencode arch=compute_70,code=sm_70 -gencode arch=compute_86,code=sm_86 ^
+     -gencode arch=compute_70,code=sm_70 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_120,code=sm_120 -gencode arch=compute_86,code=compute_86 ^
      -c cuda\octet.cu -o cuda\octet.o
 if errorlevel 1 (
     echo ERROR: CUDA compile check FAILED

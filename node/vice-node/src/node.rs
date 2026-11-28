@@ -772,6 +772,65 @@ fn route(method: &str, url: &str, body: &str, st: &mut NodeState)
                 Err(e) => (400, serde_json::json!({"error": e.to_string()}).to_string()),
             }
         }
+        ("GET", "/api/utxos") => {
+            let Some(commit) = q("commit") else {
+                return (400, "{\"error\":\"commit=? required\"}".into());
+            };
+            let utxos: Vec<serde_json::Value> = st
+                .utxo
+                .iter()
+                .filter(|(_, (c, _))| c == &commit)
+                .map(|((txid, idx), (_, amount))| {
+                    serde_json::json!({
+                        "prev_txid": txid, "out_index": idx, "amount": amount
+                    })
+                })
+                .collect();
+            (200, serde_json::json!({"utxos": utxos}).to_string())
+        }
+        // Canonical tx construction: the NODE computes the txid (no JSON
+        // canonicalization in wallets — gate-review lesson). The wallet
+        // signs the returned txid and posts the completed tx to /api/tx.
+        ("POST", "/api/tx_unsigned") => {
+            let parsed: Result<serde_json::Value, _> =
+                serde_json::from_str(body);
+            match parsed {
+                Ok(v) => {
+                    let mk_in = |i: &serde_json::Value| vice_core::tx::TxIn {
+                        prev_txid: i["prev_txid"].as_str()
+                            .unwrap_or_default().to_string(),
+                        out_index: i["out_index"].as_u64().unwrap_or(0) as u32,
+                        vk: Vec::new(),
+                        sig: Vec::new(),
+                        note_spend: None,
+                    };
+                    let mk_out = |o: &serde_json::Value| vice_core::tx::TxOut {
+                        commit: o["commit"].as_str().unwrap_or_default()
+                            .to_string(),
+                        amount: o["amount"].as_u64().unwrap_or(0),
+                        note_commit: None,
+                    };
+                    let tx = vice_core::tx::Transaction {
+                        version: 1,
+                        inputs: v["inputs"].as_array().cloned()
+                            .unwrap_or_default().iter().map(mk_in).collect(),
+                        outputs: v["outputs"].as_array().cloned()
+                            .unwrap_or_default().iter().map(mk_out).collect(),
+                        offer: None,
+                    };
+                    if tx.outputs.is_empty() {
+                        return (400, "{\"error\":\"empty outputs\"}".into());
+                    }
+                    let txid = hex::encode(tx.txid());
+                    let tx_json =
+                        serde_json::to_string(&tx).expect("serialize");
+                    (200, serde_json::json!({"txid": txid, "tx": tx_json})
+                        .to_string())
+                }
+                Err(e) => (400,
+                    serde_json::json!({"error": e.to_string()}).to_string()),
+            }
+        }
         ("GET", "/api/mempool") => (
             200,
             serde_json::json!({

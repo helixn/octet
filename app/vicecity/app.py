@@ -244,6 +244,21 @@ def run_gui() -> None:
             bal_sub.configure(text=f"нода недоступна ({e.__class__.__name__})",
                               text_color=RED)
 
+    commit_hex = wallet_commit()
+    commit_var = ctk.StringVar(value=commit_hex)
+    ctk.CTkLabel(addr_card, text="КОД ДЛЯ ВХОДЯЩИХ ПЛАТЕЖЕЙ (commit):",
+                 text_color=CYAN, font=("Consolas", 12, "bold")).pack(
+        anchor="w", padx=20, pady=(8, 0))
+    ctk.CTkEntry(addr_card, textvariable=commit_var, width=660,
+                 font=("Consolas", 12), state="readonly",
+                 fg_color=PANEL2, border_color=BORDER).pack(anchor="w",
+                                                            padx=20, pady=4)
+
+    def copy_commit():
+        root.clipboard_clear()
+        root.clipboard_append(commit_hex)
+        copy_info.configure(text="✓ commit скопирован")
+
     def copy_addr():
         root.clipboard_clear()
         root.clipboard_append(holder["w"]["address"])
@@ -255,6 +270,10 @@ def run_gui() -> None:
                   fg_color=PINK, hover_color=PINK_DARK, height=38).pack(
         side="left", padx=6)
     ctk.CTkButton(brow, text="⟳ Обновить баланс", command=refresh_balance,
+                  fg_color=PANEL2, hover_color=PANEL, height=38,
+                  border_width=1, border_color=BORDER).pack(side="left",
+                                                            padx=6)
+    ctk.CTkButton(brow, text="Скопировать commit", command=copy_commit,
                   fg_color=PANEL2, hover_color=PANEL, height=38,
                   border_width=1, border_color=BORDER).pack(side="left",
                                                             padx=6)
@@ -439,6 +458,89 @@ def run_gui() -> None:
                   command=restore_dialog, fg_color=PANEL2,
                   hover_color=PANEL, height=40, border_width=1,
                   border_color=BORDER).pack(side="left", padx=8)
+
+    # ------------------------ send ---------------------------------------------
+    from dilithium_py.ml_dsa import ML_DSA_65 as _py_dsa
+    send_card = card(wf)
+    send_card.pack(fill="x", padx=8, pady=6)
+    ctk.CTkLabel(send_card, text="ОТПРАВИТЬ (Tier 0 · прозрачная транзакция)",
+                 text_color=CYAN, font=("Consolas", 12, "bold")).pack(
+        anchor="w", padx=20, pady=(12, 0))
+    ctk.CTkLabel(send_card, text="Commit получателя (из его кошелька):",
+                 text_color=DIM).pack(anchor="w", padx=20, pady=(4, 0))
+    to_commit = ctk.StringVar()
+    ctk.CTkEntry(send_card, textvariable=to_commit, width=660,
+                 font=("Consolas", 12), fg_color=PANEL2,
+                 border_color=BORDER).pack(anchor="w", padx=20, pady=4)
+    send_row, send_amount_var, _ = slider_row(
+        send_card, "Сумма VC:", 0, 0, 0, width=240)
+    send_row.pack(fill="x", padx=20, pady=6)
+
+    def update_send_max():
+        try:
+            bal = gm.http_json(node_url.get() + "/api/balance?commit="
+                               + commit_hex, timeout=4)
+            bal_val = int(bal["balance"])
+        except Exception:
+            bal_val = 0
+        send_amount_var.set(str(min(bal_val, 10_000_000)))
+        for wdg in send_row.pack_slaves():
+            if isinstance(wdg, ctk.CTkSlider):
+                wdg.configure(to=max(1, bal_val))
+                wdg.set(min(bal_val, 10_000_000))
+
+    ctk.CTkLabel(send_card, text="Подпись локально твоим ML-DSA-65 ключом; "
+                                 "канонизация txid — на ноде (Rust)",
+                 text_color=DIM, font=("Consolas", 11)).pack(
+        anchor="w", padx=20, pady=(0, 8))
+
+    def do_send():
+        try:
+            dst = to_commit.get().strip()
+            if len(dst) != 64:
+                copy_info.configure(text="✗ commit получателя = 64 hex-символа")
+                return
+            utxos = gm.http_json(node_url.get() + "/api/utxos?commit="
+                                 + commit_hex, timeout=5)["utxos"]
+            if not utxos:
+                copy_info.configure(text="✗ нет средств (нода офлайн?)")
+                return
+            total = sum(u["amount"] for u in utxos)
+            amount = int(float(send_amount_var.get()))
+            if amount <= 0 or amount > total:
+                copy_info.configure(text=f"✗ сумма вне диапазона 0…{total}")
+                return
+            inputs = [{"prev_txid": u["prev_txid"],
+                       "out_index": u["out_index"]} for u in utxos]
+            outputs = [{"commit": dst, "amount": amount}]
+            if total - amount > 0:
+                outputs.append({"commit": commit_hex,
+                                "amount": total - amount})
+            built = gm.http_json(node_url.get() + "/api/tx_unsigned",
+                                 {"inputs": inputs, "outputs": outputs},
+                                 timeout=10)
+            tx = json.loads(built["tx"])
+            txid_bytes = bytes.fromhex(built["txid"])
+            sk_bytes = bytes.fromhex(holder["w"]["sk_hex"])
+            sig = _py_dsa.sign(sk_bytes, txid_bytes)
+            for inp in tx["inputs"]:
+                # serde Vec<u8> wants byte ARRAYS, not hex strings
+                inp["vk"] = list(bytes.fromhex(holder["w"]["vk_hex"]))
+                inp["sig"] = list(sig)
+            res = gm.http_json(node_url.get() + "/api/tx", tx, timeout=15)
+            if "accepted" in res:
+                copy_info.configure(text=f"✓ отправлено {amount} VC · "
+                                         f"tx {res['accepted'][:12]}…")
+                root.after(300, refresh_balance)
+            else:
+                copy_info.configure(text=f"✗ отклонено: {res.get('error')}")
+        except Exception as e:
+            copy_info.configure(text=f"✗ {e.__class__.__name__}: {e}")
+
+    ctk.CTkButton(send_card, text="➤ ОТПРАВИТЬ", command=do_send,
+                  fg_color=PINK, hover_color=PINK_DARK,
+                  font=("Arial", 15, "bold"), height=42, width=200).pack(
+        pady=(2, 14))
 
     # ============================ MINING PAGE ==================================
     mf = page_mining
