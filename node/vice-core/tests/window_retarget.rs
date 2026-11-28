@@ -23,10 +23,12 @@ fn window_block(height: u64, tip_target: [u8; 32], window_start_ts: u64,
             out_index: 0,
             vk: Vec::new(),
             sig: Vec::new(),
+            note_spend: None,
         }],
         outputs: vec![TxOut {
             commit: hex::encode([0u8; 32]),
             amount: vice_core::params::subsidy_at(&TESTNET, height),
+            note_commit: None,
         }],
         offer: None,
     };
@@ -40,6 +42,7 @@ fn window_block(height: u64, tip_target: [u8; 32], window_start_ts: u64,
         timestamp: ts,
         target: hex::encode(expected),
         seed_block: hex::encode(&seed_block),
+        note_root: hex::encode([0u8; 32]),
         nonce: 0,
         solution: hex::encode([0u8; 32]),
     };
@@ -84,10 +87,13 @@ fn window_boundary_template_matches_validator() {
         mtp: 100,
         node_now: 1100,
         window_start_ts,
+        note_root: [0u8; 32],
     };
     let utxo = vice_core::tx::UtxoSet::new();
-    let res = validate_block(&block, &TESTNET, &tip, &utxo, &cache,
-                             &seed_epoch);
+    let res = validate_block(&block, &TESTNET, &tip, &utxo,
+                             &vice_core::notes::NoteMerkleTree::new(),
+                             &std::collections::HashSet::new(),
+                             &cache, &seed_epoch);
     assert!(res.is_ok(), "window-boundary block must validate: {res:?}");
 }
 
@@ -108,10 +114,13 @@ fn window_boundary_rejects_wrong_target() {
         mtp: 100,
         node_now: 1100,
         window_start_ts: 90,
+        note_root: [0u8; 32],
     };
     let res = validate_block(&block, &TESTNET,
-                             &tip, &vice_core::tx::UtxoSet::new(), &cache,
-                             &seed_epoch);
+                             &tip, &vice_core::tx::UtxoSet::new(),
+                             &vice_core::notes::NoteMerkleTree::new(),
+                             &std::collections::HashSet::new(),
+                             &cache, &seed_epoch);
     // the header-only continuity check fires BEFORE the expensive solve
     assert!(matches!(res, Err(vice_core::tx::ValidationError::TargetMismatch { .. })),
             "tampered target must be rejected by the continuity check");

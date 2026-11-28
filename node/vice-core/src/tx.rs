@@ -2,7 +2,7 @@
 //! Tier 0 transparent model: outputs locked to `commit = BLAKE2b-256(vk)`.
 //! Note pool (Tier 2) structures are reserved by the genesis design —
 //! see docs/crypto.md §3; nothing ECC ever enters consensus.
-use crate::addr::{blake2b_256, commit_of_vk, verify as dsa_verify};
+use crate::addr::{blake2b_256, commit_of_vk, vk_from_bytes, verify as dsa_verify};
 use crate::params::{subsidy_at, Params};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,15 @@ pub fn parse_coinbase_height(prev_txid: &str) -> Option<u64> {
     Some(u64::from_le_bytes(raw.try_into().ok()?))
 }
 
+/// Note spend: reveals the opening (ownership by recommit), carries the
+/// merkle path proving the commit is in the note tree, and the index.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct NoteSpend {
+    pub opening: crate::notes::NoteOpening,
+    pub index: usize,
+    pub path: Vec<[u8; 32]>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxIn {
     pub prev_txid: String, // hex; COINBASE_INPUT for coinbase
@@ -29,12 +38,20 @@ pub struct TxIn {
     pub vk: Vec<u8>,
     /// ML-DSA-65 signature over the txid of this transaction
     pub sig: Vec<u8>,
+    /// Note spend (Tier 2): opening + merkle path. prev_txid holds the
+    /// hex nullifier for pool checks; out_index is unused for notes.
+    #[serde(default)]
+    pub note_spend: Option<NoteSpend>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxOut {
-    pub commit: String, // hex of BLAKE2b-256(vk)
+    pub commit: String, // hex of BLAKE2b-256(vk) — transparent lock
     pub amount: u64,
+    /// Tier 2 note output: Some(hex note_commit) — locked to whoever holds
+    /// the opening (rho, r). Amount stays public (honest no-zk Tier 2).
+    #[serde(default)]
+    pub note_commit: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,7 +71,7 @@ impl Transaction {
         let shadow: Vec<_> = self
             .inputs
             .iter()
-            .map(|i| (i.prev_txid.clone(), i.out_index))
+            .map(|i| (i.prev_txid.clone(), i.out_index, &i.note_spend))
             .collect();
         // offer field included in the txid (offers §4.2 rule 3): the taker
         // signature binds the embedded maker shoulder as well
@@ -132,6 +149,7 @@ pub struct BlockHeader {
     pub timestamp: u64,
     pub target: String,         // hex, big-endian compare against `solution`
     pub seed_block: String,     // hex, 64 B — binds the PoW dataset re-key
+    pub note_root: String,      // hex 32 B — note-merkle root after this block
     pub nonce: u64,
     pub solution: String,       // hex 32 B — final hash of the OctetHash attempt
 }
@@ -153,6 +171,7 @@ impl Block {
             self.header.timestamp,
             &self.header.target,
             &self.header.seed_block,
+            &self.header.note_root,
         );
         blake2b_256(&serde_json::to_vec(&shadow).expect("serialize"))
     }
@@ -182,6 +201,9 @@ pub enum ValidationError {
     CoinbaseHeightMismatch { expected: u64 },
     SeedBlockMismatch { expected: String, got: String },
     TargetMismatch { expected: String, got: String },
+    NoteRootMismatch { expected: String, got: String },
+    NoteSpendInvalid { index: usize },
+    NoteDoubleSpend { index: usize },
     TimestampNotMonotonic { mtp: u64, got: u64 },
     TimestampTooFarFuture { max: u64, got: u64 },
     DoubleSpend,
@@ -213,13 +235,18 @@ pub struct TipContext<'a> {
     /// Timestamp of the retarget-window start block (height−interval) —
     /// the elapsed time of the window is measured from it.
     pub window_start_ts: u64,
+    /// Note-merkle root as of the tip (before this block's note outputs).
+    pub note_root: [u8; 32],
 }
 
+#[allow(clippy::too_many_arguments)] // TipContext absorbed 5; tree+pool remain
 pub fn validate_block(
     block: &Block,
     params: &Params,
     tip: &TipContext,
     utxo: &UtxoSet,
+    note_tree: &crate::notes::NoteMerkleTree,
+    nullifier_pool: &std::collections::HashSet<String>,
     cache: &[Vec<u8>],
     seed_epoch: &[u8],
 ) -> Result<UtxoSet, ValidationError> {
@@ -317,6 +344,11 @@ pub fn validate_block(
         next.insert((cb_txid_hex.clone(), out_idx as u32),
                     (out.commit.clone(), out.amount));
     }
+    // Tier 2: note outputs of this block — appended to the tip tree; the
+    // resulting root must match the header claim
+    let mut tree = note_tree.clone();
+
+    let mut spent: std::collections::HashSet<String> = nullifier_pool.clone();
     // PoW: light-path recompute from cache (the oracle-consistent check)
     let pow_header = block.pow_header();
     let nonce = block.header.nonce;
@@ -337,7 +369,43 @@ pub fn validate_block(
         }
         let txid = tx.txid();
         let mut in_total = 0u64;
-        for input in &tx.inputs {
+        for (in_idx, input) in tx.inputs.iter().enumerate() {
+            // Tier 2 note spend: opening + merkle membership + nullifier
+            if let Some(ns) = &input.note_spend {
+                let commit = ns.opening.commit();
+                let nf = crate::notes::nullifier(&ns.opening.rho, &commit);
+                if hex::encode(nf) != input.prev_txid {
+                    return Err(ValidationError::NoteSpendInvalid {
+                        index: in_idx,
+                    });
+                }
+                if !crate::notes::verify_merkle_path(
+                    commit, ns.index, &ns.path, &tip.note_root,
+                ) {
+                    return Err(ValidationError::NoteSpendInvalid {
+                        index: in_idx,
+                    });
+                }
+                // ownership: the note owner's key signs the txid
+                let Some(vk) = vk_from_bytes(&ns.opening.vk) else {
+                    return Err(ValidationError::NoteSpendInvalid {
+                        index: in_idx,
+                    });
+                };
+                if !dsa_verify(&vk, &txid, &input.sig) {
+                    return Err(ValidationError::NoteSpendInvalid {
+                        index: in_idx,
+                    });
+                }
+                if spent.contains(&hex::encode(nf)) {
+                    return Err(ValidationError::NoteDoubleSpend {
+                        index: in_idx,
+                    });
+                }
+                spent.insert(hex::encode(nf));
+                in_total += ns.opening.amount;
+                continue;
+            }
             let key = (input.prev_txid.clone(), input.out_index);
             let Some((commit, amount)) = next.get(&key) else {
                 return Err(ValidationError::UnknownOutpoint);
@@ -361,6 +429,19 @@ pub fn validate_block(
             return Err(ValidationError::Overspend { in_total, out_total });
         }
         for (out_idx, out) in tx.outputs.iter().enumerate() {
+            if let Some(nc) = &out.note_commit {
+                let Ok(commit32) = hex::decode(nc) else {
+                    return Err(ValidationError::NoteSpendInvalid {
+                        index: out_idx,
+                    });
+                };
+                if commit32.len() == 32 {
+                    let mut c = [0u8; 32];
+                    c.copy_from_slice(&commit32);
+                    tree.push(c);
+                }
+                continue; // note outputs live in the tree, not the UTXO map
+            }
             next.insert((hex::encode(txid), out_idx as u32),
                         (out.commit.clone(), out.amount));
         }

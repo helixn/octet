@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const NOTE_COMMIT_LEN: usize = 32;
 
 /// Full opening of a note — revealed at spend time.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct NoteOpening {
     /// owner's ML-DSA-65 verification key (1952 B)
     pub vk: Vec<u8>,
@@ -92,6 +92,7 @@ pub fn verify_opening(opening: &NoteOpening, commit: &[u8; 32],
 // Note-merkle tree: append-only commitment tree over note commits.
 // Duplicate-last padding on odd levels (same rule as tx merkle).
 // ---------------------------------------------------------------------------
+#[derive(Clone)]
 pub struct NoteMerkleTree {
     leaves: Vec<[u8; 32]>,
 }

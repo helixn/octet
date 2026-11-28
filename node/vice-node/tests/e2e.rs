@@ -78,10 +78,12 @@ fn e2e_chain_mine_tx_sync() {
             out_index: 0,
             vk: Vec::new(),
             sig: Vec::new(),
+            note_spend: None,
         }],
         outputs: vec![vice_core::tx::TxOut {
             commit: recv_commit.clone(),
             amount: TESTNET.subsidy - 1, // keep 1 VC as "fee"
+            note_commit: None,
         }],
         offer: None,
     };

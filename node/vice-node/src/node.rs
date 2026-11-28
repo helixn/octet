@@ -20,6 +20,8 @@ fn now() -> u64 {
 pub struct NodeState {
     params: Params,
     jobs: HashMap<String, Block>,
+    note_tree: vice_core::notes::NoteMerkleTree,
+    spent_nullifiers: std::collections::HashSet<String>,
     datadir: PathBuf,
     cache: Vec<Vec<u8>>,
     seed_epoch: Vec<u8>,
@@ -41,6 +43,8 @@ impl NodeState {
         let mut st = NodeState {
             params,
             jobs: HashMap::new(),
+            note_tree: vice_core::notes::NoteMerkleTree::new(),
+            spent_nullifiers: std::collections::HashSet::new(),
             datadir,
             cache,
             seed_epoch,
@@ -86,10 +90,12 @@ impl NodeState {
                 out_index: 0,
                 vk: Vec::new(),
                 sig: Vec::new(),
+                note_spend: None,
             }],
             outputs: vec![vice_core::tx::TxOut {
                 commit: hex::encode([0u8; 32]),
                 amount: subsidy,
+                note_commit: None,
             }],
             offer: None,
         };
@@ -102,6 +108,7 @@ impl NodeState {
             timestamp: 0, // pinned (gate K4) — genesis must be identical everywhere
             target: hex::encode(self.params.target),
             seed_block: hex::encode(block_seed(&[0u8; 32], 0)),
+            note_root: hex::encode([0u8; 32]),
             nonce: 0,
             solution: hex::encode([0u8; 32]),
         };
@@ -118,6 +125,17 @@ impl NodeState {
         for tx in &block.txs {
             let txid_hex = hex::encode(tx.txid());
             for (idx, out) in tx.outputs.iter().enumerate() {
+                if let Some(nc) = &out.note_commit {
+                    // Tier 2: note output goes to the commitment tree
+                    if let Ok(raw) = hex::decode(nc) {
+                        if raw.len() == 32 {
+                            let mut c = [0u8; 32];
+                            c.copy_from_slice(&raw);
+                            self.note_tree.push(c);
+                        }
+                    }
+                    continue;
+                }
                 self.utxo.insert(
                     (txid_hex.clone(), idx as u32),
                     (out.commit.clone(), out.amount),
@@ -125,8 +143,14 @@ impl NodeState {
             }
         }
         for tx in &block.txs {
-            if !tx.is_coinbase() {
-                for input in &tx.inputs {
+            for input in &tx.inputs {
+                if let Some(ns) = &input.note_spend {
+                    // Tier 2: consumed nullifiers enter the spent pool
+                    self.spent_nullifiers
+                        .insert(hex::encode(ns.opening.nullifier()));
+                    continue;
+                }
+                if !tx.is_coinbase() {
                     self.utxo
                         .remove(&(input.prev_txid.clone(), input.out_index));
                 }
@@ -213,10 +237,12 @@ impl NodeState {
                 out_index: 0,
                 vk: Vec::new(),
                 sig: Vec::new(),
+                note_spend: None,
             }],
             outputs: vec![vice_core::tx::TxOut {
                 commit: coinbase_commit.to_string(),
                 amount: subsidy,
+                note_commit: None,
             }],
             offer: None,
         }];
@@ -226,6 +252,20 @@ impl NodeState {
         let mut timestamp = now();
         if timestamp <= self.mtp() {
             timestamp = self.mtp() + 1; // must be strictly above MTP
+        }
+        let mut note_tree = self.note_tree.clone();
+        for txx in &txs {
+            for out in &txx.outputs {
+                if let Some(nc) = &out.note_commit {
+                    if let Ok(raw) = hex::decode(nc) {
+                        if raw.len() == 32 {
+                            let mut c = [0u8; 32];
+                            c.copy_from_slice(&raw);
+                            note_tree.push(c);
+                        }
+                    }
+                }
+            }
         }
         let interval = self.params.retarget_interval.max(1);
         let target = if height.is_multiple_of(interval) && height > 0 {
@@ -252,6 +292,7 @@ impl NodeState {
                 timestamp,
                 target,
                 seed_block: hex::encode(&seed_block),
+                note_root: hex::encode(note_tree.root()),
                 nonce: 0,
                 solution: hex::encode([0u8; 32]),
             },
@@ -319,8 +360,11 @@ impl NodeState {
                 mtp,
                 node_now: now(),
                 window_start_ts,
+                note_root: self.note_tree.root(),
             },
             &self.utxo,
+            &self.note_tree,
+            &self.spent_nullifiers,
             &self.cache,
             &self.seed_epoch,
         )

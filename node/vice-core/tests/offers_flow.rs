@@ -63,12 +63,14 @@ fn build_completion_ext(pay_ask: bool)
                 out_index: 0,
                 vk: maker_vk.clone(),
                 sig: Vec::new(),
+                note_spend: None,
             },
             vice_core::tx::TxIn {
                 prev_txid: hex::encode(part.maker_inputs[1].nullifier),
                 out_index: 0,
                 vk: maker_vk.clone(),
                 sig: Vec::new(),
+                note_spend: None,
             },
             // taker side (transparent spend, per-input sig)
             vice_core::tx::TxIn {
@@ -76,17 +78,20 @@ fn build_completion_ext(pay_ask: bool)
                 out_index: 0,
                 vk: Vec::new(),
                 sig: Vec::new(),
+                note_spend: None,
             },
         ],
         outputs: {
             let mut o = vec![vice_core::tx::TxOut {
                 commit: hex::encode(part.maker_outputs[0].commit),
                 amount: 10,
+                note_commit: None,
             }];
             if pay_ask {
                 o.push(vice_core::tx::TxOut {
                     commit: hex::encode(taker_commit),
                     amount: 40, // == ask.amount — rule 5
+                    note_commit: None,
                 });
             }
             o
