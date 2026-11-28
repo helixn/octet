@@ -28,6 +28,7 @@ fn window_block(height: u64, tip_target: [u8; 32], window_start_ts: u64,
             commit: hex::encode([0u8; 32]),
             amount: vice_core::params::subsidy_at(&TESTNET, height),
         }],
+        offer: None,
     };
     let seed_block = block_seed(tip_solution, height);
     let mut header = BlockHeader {

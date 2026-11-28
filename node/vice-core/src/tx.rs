@@ -42,6 +42,10 @@ pub struct Transaction {
     pub version: u32,
     pub inputs: Vec<TxIn>,
     pub outputs: Vec<TxOut>,
+    /// OfferCompletion attachment (docs/crypto.md §4.2): embedded in the
+    /// txid so the taker's signature binds the maker shoulder too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<crate::offers::OfferAttachment>,
 }
 
 impl Transaction {
@@ -52,8 +56,14 @@ impl Transaction {
             .iter()
             .map(|i| (i.prev_txid.clone(), i.out_index))
             .collect();
-        serde_json::to_vec(&(&self.version, &shadow, &self.outputs))
-            .expect("serialize")
+        // offer field included in the txid (offers §4.2 rule 3): the taker
+        // signature binds the embedded maker shoulder as well
+        let offer_part: (u8, Option<&Vec<u8>>) = match &self.offer {
+            Some(o) => (1u8, Some(&o.maker_part)),
+            None => (0u8, None),
+        };
+        serde_json::to_vec(&(&self.version, &shadow, &self.outputs,
+                             &offer_part)).expect("serialize")
     }
 
     pub fn txid(&self) -> [u8; 32] {
@@ -76,6 +86,20 @@ impl Transaction {
             input.sig = crate::addr::sign(sk, &txid);
         }
     }
+
+    /// Sign only the given input indices (offers: taker signs their own
+    /// inputs; maker shoulder inputs stay sig-less — replaced by maker_sig).
+    pub fn sign_indices(&mut self,
+                        sk: &ml_dsa::SigningKey<ml_dsa::MlDsa65>,
+                        vk_bytes: &[u8], indices: &[usize]) {
+        let txid = self.txid();
+        for &i in indices {
+            if let Some(input) = self.inputs.get_mut(i) {
+                input.vk = vk_bytes.to_vec();
+                input.sig = crate::addr::sign(sk, &txid);
+            }
+        }
+    }
 }
 
 pub fn merkle_root(txids: &[[u8; 32]]) -> [u8; 32] {
@@ -84,7 +108,7 @@ pub fn merkle_root(txids: &[[u8; 32]]) -> [u8; 32] {
     }
     let mut level: Vec<[u8; 32]> = txids.to_vec();
     while level.len() > 1 {
-        if level.len() % 2 == 1 {
+        if !level.len().is_multiple_of(2) {
             level.push(level[level.len() - 1]); // duplicate-last (BIP-141 style)
         }
         let mut next = Vec::with_capacity(level.len() / 2);

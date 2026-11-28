@@ -91,6 +91,7 @@ impl NodeState {
                 commit: hex::encode([0u8; 32]),
                 amount: subsidy,
             }],
+            offer: None,
         };
         let txids: Vec<[u8; 32]> = vec![coinbase.txid()];
         let header = BlockHeader {
@@ -217,6 +218,7 @@ impl NodeState {
                 commit: coinbase_commit.to_string(),
                 amount: subsidy,
             }],
+            offer: None,
         }];
         txs.extend(self.mempool.values().cloned());
         let txids: Vec<[u8; 32]> = txs.iter().map(|t| t.txid()).collect();

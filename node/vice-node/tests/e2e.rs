@@ -83,6 +83,7 @@ fn e2e_chain_mine_tx_sync() {
             commit: recv_commit.clone(),
             amount: TESTNET.subsidy - 1, // keep 1 VC as "fee"
         }],
+        offer: None,
     };
     tx.sign_inputs(&payer_kp.sk, &vk_of(&payer_kp));
     let txid = node1.lock().unwrap().accept_tx(tx).expect("mempool");
