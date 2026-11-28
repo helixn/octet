@@ -9,6 +9,7 @@ use std::time::Duration;
 use vice_core::tx::Transaction;
 use vice_core::addr::vc_address;
 use vice_core::{keygen, TESTNET};
+use vice_core::addr::blake2b_256;
 fn commit_of(vk: &[u8]) -> String {
     hex::encode(vice_core::addr::commit_of_vk(vk))
 }
@@ -107,6 +108,95 @@ fn e2e_chain_mine_tx_sync() {
     assert_eq!(node1.lock().unwrap().mempool_len(), 0);
     assert_ne!(id1, id2);
 
+    // ---- Tier 2 note cycle: transparent -> note -> spend -> transparent ----
+    let recv_kp2 = keygen();
+    let recv2_commit = commit_of(&vk_of(&recv_kp2));
+    // 1) receiver wraps their transparent 9 VC into a NOTE output
+    let opening = vice_core::notes::NoteOpening::new(vk_of(&recv_kp2),
+                                                     TESTNET.subsidy - 1);
+    let note_commit_hex = hex::encode(opening.commit());
+    let mut tx_note = Transaction {
+        version: 1,
+        inputs: vec![vice_core::tx::TxIn {
+            prev_txid: txid.clone(),
+            out_index: 0,
+            vk: Vec::new(),
+            sig: Vec::new(),
+            note_spend: None,
+        }],
+        outputs: vec![vice_core::tx::TxOut {
+            commit: recv_commit.clone(),
+            amount: TESTNET.subsidy - 1,
+            note_commit: Some(note_commit_hex.clone()),
+        }],
+        offer: None,
+    };
+    tx_note.sign_inputs(&recv_kp.sk, &vk_of(&recv_kp));
+    node1.lock().unwrap().accept_tx(tx_note).expect("note funding tx");
+    let id3 = mine_and_submit(&node1, &miner_commit);
+    assert_eq!(node1.lock().unwrap().height(), 3);
+    // the transparent balance is gone — the value now lives in the note
+    assert_eq!(node1.lock().unwrap().balance(&recv_commit), 0);
+
+    // 2) receiver spends the note: opening + path + owner sig
+    eprintln!("test note_commit_hex = {}", note_commit_hex);
+    let (note_index, note_path) = node1.lock().unwrap()
+        .note_path_for(&note_commit_hex).expect("note in tree");
+    let mut tx_spend = Transaction {
+        version: 1,
+        inputs: vec![vice_core::tx::TxIn {
+            prev_txid: hex::encode(opening.nullifier()),
+            out_index: 0,
+            vk: Vec::new(),
+            sig: Vec::new(),
+            note_spend: Some(vice_core::tx::NoteSpend {
+                opening: opening.clone(),
+                index: note_index,
+                path: note_path.clone(),
+            }),
+        }],
+        outputs: vec![vice_core::tx::TxOut {
+            commit: recv2_commit.clone(),
+            amount: TESTNET.subsidy - 1,
+            note_commit: None,
+        }],
+        offer: None,
+    };
+    tx_spend.sign_inputs(&recv_kp2.sk, &vk_of(&recv_kp2));
+    node1.lock().unwrap().accept_tx(tx_spend).expect("note spend tx");
+    let id4 = mine_and_submit(&node1, &miner_commit);
+    assert_eq!(node1.lock().unwrap().height(), 4);
+    assert_eq!(node1.lock().unwrap().balance(&recv2_commit),
+               TESTNET.subsidy - 1, "note spend credited");
+    assert!(node1.lock().unwrap().nullifier_spent(
+        &hex::encode(opening.nullifier())), "nullifier burned");
+
+    // double-spend the same note → rejected (nullifier already spent)
+    let mut tx_double = Transaction {
+        version: 1,
+        inputs: vec![vice_core::tx::TxIn {
+            prev_txid: hex::encode(opening.nullifier()),
+            out_index: 0,
+            vk: Vec::new(),
+            sig: Vec::new(),
+            note_spend: Some(vice_core::tx::NoteSpend {
+                opening: opening.clone(),
+                index: note_index,
+                path: note_path.clone(),
+            }),
+        }],
+        outputs: vec![vice_core::tx::TxOut {
+            commit: hex::encode(blake2b_256(b"attacker")),
+            amount: TESTNET.subsidy - 1,
+            note_commit: None,
+        }],
+        offer: None,
+    };
+    tx_double.sign_inputs(&recv_kp2.sk, &vk_of(&recv_kp2));
+    assert!(node1.lock().unwrap().accept_tx(tx_double).is_err(),
+            "note double-spend must be rejected");
+    let _ = (id3, id4);
+
     // second node syncs over real TCP p2p
     let dir2 = std::env::temp_dir().join("vice_e2e_node2");
     let _ = std::fs::remove_dir_all(&dir2);
@@ -119,7 +209,10 @@ fn e2e_chain_mine_tx_sync() {
     node2.lock().unwrap().add_peer("127.0.0.1:19393".to_string());
     node2.lock().unwrap().sync_once();
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(node2.lock().unwrap().height(), 2, "synced from peer");
-    assert_eq!(node2.lock().unwrap().balance(&recv_commit),
+    assert_eq!(node2.lock().unwrap().height(), 4, "synced from peer");
+    // the note-spend output synced through the full chain replay
+    assert_eq!(node2.lock().unwrap().balance(&recv2_commit),
                TESTNET.subsidy - 1, "utxo synced");
+    assert!(node2.lock().unwrap().nullifier_spent(
+        &hex::encode(opening.nullifier())), "nullifier pool synced");
 }

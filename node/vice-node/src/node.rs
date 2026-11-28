@@ -121,12 +121,12 @@ impl NodeState {
         );
     }
 
-    fn apply_unchecked(&mut self, block: &Block) {
+    /// Tier 2 note updates: commits → tree, consumed nullifiers → pool.
+    /// Used by BOTH accept_block and the chain replay (load_or_genesis).
+    fn apply_note_updates(&mut self, block: &Block) {
         for tx in &block.txs {
-            let txid_hex = hex::encode(tx.txid());
-            for (idx, out) in tx.outputs.iter().enumerate() {
+            for out in &tx.outputs {
                 if let Some(nc) = &out.note_commit {
-                    // Tier 2: note output goes to the commitment tree
                     if let Ok(raw) = hex::decode(nc) {
                         if raw.len() == 32 {
                             let mut c = [0u8; 32];
@@ -134,7 +134,23 @@ impl NodeState {
                             self.note_tree.push(c);
                         }
                     }
-                    continue;
+                }
+            }
+            for input in &tx.inputs {
+                if let Some(ns) = &input.note_spend {
+                    self.spent_nullifiers
+                        .insert(hex::encode(ns.opening.nullifier()));
+                }
+            }
+        }
+    }
+
+    fn apply_unchecked(&mut self, block: &Block) {
+        for tx in &block.txs {
+            let txid_hex = hex::encode(tx.txid());
+            for (idx, out) in tx.outputs.iter().enumerate() {
+                if out.note_commit.is_some() {
+                    continue; // note outputs live in the tree
                 }
                 self.utxo.insert(
                     (txid_hex.clone(), idx as u32),
@@ -144,10 +160,7 @@ impl NodeState {
         }
         for tx in &block.txs {
             for input in &tx.inputs {
-                if let Some(ns) = &input.note_spend {
-                    // Tier 2: consumed nullifiers enter the spent pool
-                    self.spent_nullifiers
-                        .insert(hex::encode(ns.opening.nullifier()));
+                if input.note_spend.is_some() {
                     continue;
                 }
                 if !tx.is_coinbase() {
@@ -156,6 +169,7 @@ impl NodeState {
                 }
             }
         }
+        self.apply_note_updates(block);
         self.blocks.push(block.clone());
     }
 
@@ -195,6 +209,27 @@ impl NodeState {
         let mut in_total = 0u64;
         let mut spent = Vec::new();
         for input in &tx.inputs {
+            // Tier 2 note spend: ownership by opening + fresh nullifier
+            if let Some(ns) = &input.note_spend {
+                let commit = ns.opening.commit();
+                let nf = vice_core::notes::nullifier(&ns.opening.rho, &commit);
+                if hex::encode(nf) != input.prev_txid {
+                    return Err("bad note nullifier".into());
+                }
+                let Some(vk) = vice_core::addr::vk_from_bytes(&ns.opening.vk)
+                else {
+                    return Err("bad note vk".into());
+                };
+                if !vice_core::addr::verify(&vk, &tx.txid(), &input.sig) {
+                    return Err("bad note signature".into());
+                }
+                if self.spent_nullifiers.contains(&hex::encode(nf)) {
+                    return Err("nullifier already spent".into());
+                }
+                in_total += ns.opening.amount;
+                spent.push((input.prev_txid.clone(), input.out_index));
+                continue;
+            }
             let key = (input.prev_txid.clone(), input.out_index);
             let Some((commit, amount)) = self.utxo.get(&key) else {
                 return Err(format!("unknown outpoint {}", input.prev_txid));
@@ -374,6 +409,7 @@ impl NodeState {
             self.mempool.remove(&txid_hex);
         }
         self.utxo = next_utxo;
+        self.apply_note_updates(&block);   // ← was missing: tree + nullifiers
         self.persist(&block);
         self.blocks.push(block.clone());
         Ok(block.block_id_hex())
@@ -412,6 +448,36 @@ impl NodeState {
         let n = self.blocks.len();
         let idx = n.saturating_sub(interval as usize);
         self.blocks[idx].header.timestamp
+    }
+
+    /// Merkle path + index for a note commit (by hex) — for spend building.
+    pub fn note_path_for(&self, commit_hex: &str) -> Option<(usize, Vec<[u8; 32]>)> {
+        let mut c = [0u8; 32];
+        c.copy_from_slice(&hex::decode(commit_hex).ok()?);
+        eprintln!("note_path_for: tree leaves approx, scanning blocks...");
+        // walk leaves: the tree stores only commits; index = position
+        // (the tree exposes leaves indirectly — recompute by scanning the chain)
+        let mut idx = None;
+        let mut counter = 0usize;
+        for b in &self.blocks {
+            for tx in &b.txs {
+                for out in &tx.outputs {
+                    if let Some(nc) = &out.note_commit {
+                        if nc == commit_hex {
+                            idx = Some(counter);
+                        }
+                        counter += 1;
+                    }
+                }
+            }
+        }
+        let i = idx?;
+        let path = self.note_tree.path(i)?;
+        Some((i, path))
+    }
+
+    pub fn nullifier_spent(&self, nf_hex: &str) -> bool {
+        self.spent_nullifiers.contains(nf_hex)
     }
 
     pub fn tip_target(&self) -> String {
